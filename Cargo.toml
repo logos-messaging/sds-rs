@@ -1,0 +1,13 @@
+[package]
+name = "sds"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+prost = "0.14"
+rand_core = "0.10"
+sha2 = "0.11"
+
+[dev-dependencies]
+rand = "0.10"
