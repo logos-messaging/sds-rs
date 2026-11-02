@@ -4,6 +4,7 @@ use crate::proto::HistoryEntry;
 pub enum Event {
     MessageReady {
         message_id: String,
+        sender_id: String,
         content: Vec<u8>,
     },
     MessageAcknowledged {

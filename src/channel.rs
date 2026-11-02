@@ -252,12 +252,13 @@ impl<S: Storage> Channel<S> {
         self.record_in_log(LogEntry {
             message_id: message_id.clone(),
             lamport_timestamp: delivery.lamport_timestamp,
-            sender_id,
+            sender_id: sender_id.clone(),
             retrieval_hint: delivery.retrieval_hint,
             wire_bytes: is_responder.then_some(delivery.wire_bytes),
         });
         Event::MessageReady {
             message_id,
+            sender_id,
             content: content.unwrap_or_default(),
         }
     }
@@ -364,6 +365,7 @@ fn has_content(message: &Message) -> bool {
 fn ready_event(message: Message) -> Event {
     Event::MessageReady {
         message_id: message.message_id,
+        sender_id: message.sender_id,
         content: message.content.unwrap_or_default(),
     }
 }
