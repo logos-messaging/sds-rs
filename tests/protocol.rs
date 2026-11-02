@@ -57,6 +57,7 @@ fn delivers_message_with_met_dependencies() {
         events,
         [Event::MessageReady {
             message_id: "m1".into(),
+            sender_id: "alice".into(),
             content: b"m1".to_vec()
         }]
     );
@@ -79,6 +80,32 @@ fn buffers_until_dependencies_arrive() {
     let events = bob.receive(&m1, None, 2000).unwrap();
     assert_eq!(ready_ids(&events), ["m1", "m2"]);
     assert_eq!(bob.history(), ["m1", "m2"]);
+}
+
+#[test]
+fn reports_the_sender_of_each_released_message() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    let mut carol = channel("carol");
+    let from_alice = send(&mut alice, "m1", 1000);
+    bob.receive(&from_alice, None, 1000).unwrap();
+    let from_bob = send(&mut bob, "m2", 2000);
+
+    carol.receive(&from_bob, None, 2000).unwrap();
+    let events = carol.receive(&from_alice, None, 2000).unwrap();
+
+    let senders: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageReady {
+                message_id,
+                sender_id,
+                ..
+            } => Some((message_id.as_str(), sender_id.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(senders, [("m1", "alice"), ("m2", "bob")]);
 }
 
 #[test]
@@ -200,6 +227,7 @@ fn delivers_ephemeral_messages_without_logging() {
         events,
         [Event::MessageReady {
             message_id: "e1".into(),
+            sender_id: "alice".into(),
             content: b"hi".to_vec()
         }]
     );
