@@ -16,7 +16,7 @@ const DEFAULT_REPAIR_T_MAX_MS: u64 = 300_000;
 const DEFAULT_NUM_RESPONSE_GROUPS: u64 = 1;
 const DEFAULT_MAX_REPAIR_REQUESTS: usize = 3;
 
-/// Bloom and repair settings must match across all participants in a channel.
+/// Bloom, repair and delivery settings must match across all participants in a channel.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub participant_id: String,
@@ -32,7 +32,17 @@ pub struct Config {
     pub dependency_timeout_ms: u64,
     pub max_incoming_buffer: usize,
     pub max_content_size: usize,
+    pub delivery: Delivery,
     pub repair: Option<RepairConfig>,
+}
+
+/// When a received message with unmet dependencies is delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Held until its dependencies are delivered, as the spec requires.
+    Causal,
+    /// Delivered at once; its missing dependencies are still reported and, with SDS-R, requested.
+    OnArrival,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +69,7 @@ impl Config {
             dependency_timeout_ms: DEFAULT_DEPENDENCY_TIMEOUT_MS,
             max_incoming_buffer: DEFAULT_MAX_INCOMING_BUFFER,
             max_content_size: DEFAULT_MAX_CONTENT_SIZE,
+            delivery: Delivery::Causal,
             repair: Some(RepairConfig::default()),
         }
     }

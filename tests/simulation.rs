@@ -1,6 +1,6 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use sds::{Channel, Config, Event, OutgoingMessage};
+use sds::{Channel, Config, Delivery, Event, OutgoingMessage};
 
 const PARTICIPANTS: [&str; 3] = ["alice", "bob", "carol"];
 const STEP_MS: u64 = 5_000;
@@ -10,18 +10,26 @@ const DROP_PERCENT: u64 = 10;
 
 struct Network {
     channels: Vec<Channel>,
+    delivered: Vec<Vec<String>>,
+    lost: Vec<String>,
     in_flight: Vec<(usize, Vec<u8>)>,
     rng: StdRng,
 }
 
 impl Network {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, delivery: Delivery) -> Self {
         let channels = PARTICIPANTS
             .iter()
-            .map(|id| Channel::new(Config::new(*id, "chan")).unwrap())
+            .map(|id| {
+                let mut config = Config::new(*id, "chan");
+                config.delivery = delivery;
+                Channel::new(config).unwrap()
+            })
             .collect();
         Self {
             channels,
+            delivered: vec![Vec::new(); PARTICIPANTS.len()],
+            lost: Vec::new(),
             in_flight: Vec::new(),
             rng: StdRng::seed_from_u64(seed),
         }
@@ -49,8 +57,12 @@ impl Network {
     fn tick(&mut self, now_ms: u64) {
         for from in 0..self.channels.len() {
             for event in self.channels[from].tick(now_ms, &mut self.rng) {
-                if let Event::Resend(bytes) | Event::Sync(bytes) | Event::Repair(bytes) = event {
-                    self.broadcast(from, bytes);
+                match event {
+                    Event::Resend(bytes) | Event::Sync(bytes) | Event::Repair(bytes) => {
+                        self.broadcast(from, bytes)
+                    }
+                    Event::Lost { message_id } => self.lost.push(message_id),
+                    _ => {}
                 }
             }
         }
@@ -63,9 +75,16 @@ impl Network {
             if self.rng.next_u64() % 100 < DROP_PERCENT {
                 continue;
             }
-            self.channels[to]
+            let events = self.channels[to]
                 .receive(&wire_bytes, None, now_ms)
                 .unwrap();
+            for event in events {
+                match event {
+                    Event::MessageReady { message_id, .. } => self.delivered[to].push(message_id),
+                    Event::Lost { message_id } => self.lost.push(message_id),
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -77,10 +96,8 @@ fn shuffle<T>(items: &mut [T], rng: &mut StdRng) {
     }
 }
 
-#[test]
-fn participants_converge_despite_loss_and_reordering() {
-    let mut network = Network::new(42);
-
+fn run_with_loss_and_reordering(delivery: Delivery) -> Network {
+    let mut network = Network::new(42, delivery);
     for step in 0..SENDING_STEPS + SETTLING_STEPS {
         let now_ms = step * STEP_MS;
         if step < SENDING_STEPS {
@@ -89,8 +106,32 @@ fn participants_converge_despite_loss_and_reordering() {
         network.tick(now_ms);
         network.deliver_with_loss(now_ms);
     }
+    network
+}
 
+fn assert_converged_and_delivered_once(network: &Network) {
     let histories: Vec<Vec<String>> = network.channels.iter().map(Channel::history).collect();
     assert_eq!(histories[0].len(), SENDING_STEPS as usize);
     assert!(histories.iter().all(|history| *history == histories[0]));
+    for (participant, delivered) in network.delivered.iter().enumerate() {
+        let mut from_others: Vec<&String> = histories[0]
+            .iter()
+            .filter(|message_id| !message_id.starts_with(PARTICIPANTS[participant]))
+            .collect();
+        let mut delivered: Vec<&String> = delivered.iter().collect();
+        from_others.sort();
+        delivered.sort();
+        assert_eq!(delivered, from_others);
+    }
+    assert!(network.lost.is_empty());
+}
+
+#[test]
+fn participants_converge_despite_loss_and_reordering() {
+    assert_converged_and_delivered_once(&run_with_loss_and_reordering(Delivery::Causal));
+}
+
+#[test]
+fn participants_converge_when_delivering_on_arrival() {
+    assert_converged_and_delivered_once(&run_with_loss_and_reordering(Delivery::OnArrival));
 }
