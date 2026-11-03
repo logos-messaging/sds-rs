@@ -24,9 +24,17 @@ for event in channel.tick(now_ms, &mut rng) { /* ... */ }
 
 The library has no threads, timers or I/O. The caller supplies the time, the randomness and the transport.
 
+## Delivery
+
+By default a message waits until every message in its causal history is delivered, as the spec requires. `MissingDependencies` names the waiting message, and one still waiting after `dependency_timeout_ms`, or pushed out once more than `max_incoming_buffer` wait, is reported `Lost`.
+
+With `config.delivery = Delivery::OnArrival` a message is delivered and logged when it arrives. `MissingDependencies` then names a message already delivered, and with SDS-R on its missing dependencies are requested for repair. A dependency not received within `dependency_timeout_ms` of the last delivered message naming it, or pushed out once more than `max_incoming_buffer` are missing, is reported `Lost`. That is not final: a late copy is still delivered, and a dependency named again is tracked again. A message that has left the log (`max_history`) counts as missing when a later message names it.
+
+Every participant in a channel must use the same delivery. An `OnArrival` participant names messages whose own dependencies are still missing, and a spec-following peer holds every later message that names them.
+
 ## Interoperability
 
-Messages use the spec's protobuf definitions exactly. The spec leaves the hash functions open, so this crate defines them below. Any implementation joining the same channel must use the same hashes and the same `bloom_capacity`, `bloom_error_rate` and SDS-R settings.
+Messages use the spec's protobuf definitions exactly. The spec leaves the hash functions open, so this crate defines them below. Any implementation joining the same channel must use the same hashes, the same `bloom_capacity`, `bloom_error_rate` and SDS-R settings, and the same delivery.
 
 `u64_be(bytes)` reads 8 bytes as a big-endian unsigned integer.
 

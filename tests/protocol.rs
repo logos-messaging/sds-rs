@@ -1,14 +1,21 @@
 use prost::Message as _;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use sds::proto::Message;
-use sds::{Channel, Config, Error, Event, OutgoingMessage};
+use sds::proto::{HistoryEntry, Message};
+use sds::{Channel, Config, Delivery, Error, Event, OutgoingMessage};
 
 const CHANNEL_ID: &str = "chan";
 const MINUTE_MS: u64 = 60_000;
+const TICK_MS: u64 = 5_000;
 
 fn channel(participant_id: &str) -> Channel {
     Channel::new(Config::new(participant_id, CHANNEL_ID)).unwrap()
+}
+
+fn channel_delivering_on_arrival(participant_id: &str) -> Channel {
+    let mut config = Config::new(participant_id, CHANNEL_ID);
+    config.delivery = Delivery::OnArrival;
+    Channel::new(config).unwrap()
 }
 
 fn send(channel: &mut Channel, message_id: &str, now_ms: u64) -> Vec<u8> {
@@ -29,6 +36,16 @@ fn ready_ids(events: &[Event]) -> Vec<String> {
         .iter()
         .filter_map(|event| match event {
             Event::MessageReady { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn lost_ids(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Lost { message_id } => Some(message_id.clone()),
             _ => None,
         })
         .collect()
@@ -200,6 +217,148 @@ fn drops_buffered_message_after_timeout() {
     assert!(events.contains(&Event::Lost {
         message_id: "m2".into()
     }));
+}
+
+#[test]
+fn delivers_on_arrival_ahead_of_dependencies() {
+    let mut alice = channel("alice");
+    let mut bob = channel_delivering_on_arrival("bob");
+    let m1 = send(&mut alice, "m1", 1000);
+    let m2 = send(&mut alice, "m2", 2000);
+
+    let events = bob.receive(&m2, None, 2000).unwrap();
+    assert_eq!(ready_ids(&events), ["m2"]);
+    assert!(
+        matches!(&events[1], Event::MissingDependencies { message_id, missing } if message_id == "m2" && missing[0].message_id == "m1")
+    );
+
+    let events = bob.receive(&m1, None, 2000).unwrap();
+    assert_eq!(ready_ids(&events), ["m1"]);
+    assert_eq!(bob.history(), ["m1", "m2"]);
+}
+
+#[test]
+fn reports_missing_dependency_lost_after_timeout() {
+    let mut alice = channel("alice");
+    let mut bob = channel_delivering_on_arrival("bob");
+    send(&mut alice, "m1", 1000);
+    bob.receive(&send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    let timeout_ms = Config::new("bob", CHANNEL_ID).dependency_timeout_ms;
+    let events = bob.tick(2000 + timeout_ms, &mut rng());
+
+    assert_eq!(lost_ids(&events), ["m1"]);
+}
+
+#[test]
+fn restarts_wait_when_dependency_is_named_again() {
+    let mut alice = channel("alice");
+    let mut bob = channel_delivering_on_arrival("bob");
+    let mut rng = rng();
+    send(&mut alice, "m1", 1000);
+    bob.receive(&send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+    let named_again_ms = 2000 + 8 * MINUTE_MS;
+    bob.receive(
+        &send(&mut alice, "m3", named_again_ms),
+        None,
+        named_again_ms,
+    )
+    .unwrap();
+
+    let timeout_ms = Config::new("bob", CHANNEL_ID).dependency_timeout_ms;
+    assert!(lost_ids(&bob.tick(2000 + timeout_ms, &mut rng)).is_empty());
+    assert_eq!(
+        lost_ids(&bob.tick(named_again_ms + timeout_ms, &mut rng)),
+        ["m1"]
+    );
+}
+
+#[test]
+fn drops_oldest_missing_dependency_past_capacity() {
+    let mut alice = channel("alice");
+    let mut carol = channel("carol");
+    let mut config = Config::new("bob", CHANNEL_ID);
+    config.delivery = Delivery::OnArrival;
+    config.max_incoming_buffer = 1;
+    let mut bob = Channel::new(config).unwrap();
+    send(&mut alice, "m1", 1000);
+    send(&mut carol, "c1", 1000);
+    bob.receive(&send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    let events = bob
+        .receive(&send(&mut carol, "c2", 2000), None, 2000)
+        .unwrap();
+
+    assert_eq!(lost_ids(&events), ["m1"]);
+}
+
+#[test]
+fn ignores_a_message_naming_itself_as_dependency() {
+    let mut alice = channel("alice");
+    let mut config = Config::new("bob", CHANNEL_ID);
+    config.delivery = Delivery::OnArrival;
+    config.max_incoming_buffer = 1;
+    let mut bob = Channel::new(config).unwrap();
+    let mut naming_itself = Message::decode(&send(&mut alice, "m1", 1000)[..]).unwrap();
+    naming_itself.causal_history.push(HistoryEntry {
+        message_id: "m1".into(),
+        retrieval_hint: None,
+        sender_id: None,
+    });
+    let events = bob
+        .receive(&naming_itself.encode_to_vec(), None, 1000)
+        .unwrap();
+    assert_eq!(
+        events,
+        [Event::MessageReady {
+            message_id: "m1".into(),
+            sender_id: "alice".into(),
+            content: b"m1".to_vec()
+        }]
+    );
+
+    let timeout_ms = Config::new("bob", CHANNEL_ID).dependency_timeout_ms;
+    assert!(lost_ids(&bob.tick(1000 + timeout_ms, &mut rng())).is_empty());
+}
+
+#[test]
+fn forgets_missing_dependency_once_it_arrives() {
+    let mut alice = channel("alice");
+    let mut bob = channel_delivering_on_arrival("bob");
+    let m1 = send(&mut alice, "m1", 1000);
+    bob.receive(&send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+    bob.receive(&m1, None, 3000).unwrap();
+
+    let timeout_ms = Config::new("bob", CHANNEL_ID).dependency_timeout_ms;
+    let events = bob.tick(2000 + timeout_ms, &mut rng());
+
+    assert!(lost_ids(&events).is_empty());
+}
+
+#[test]
+fn keeps_requesting_repair_of_missing_dependency() {
+    let mut alice = channel("alice");
+    let mut bob = channel_delivering_on_arrival("bob");
+    let mut rng = rng();
+    send(&mut alice, "m1", 1000);
+    bob.receive(&send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    let timeout_ms = Config::new("bob", CHANNEL_ID).dependency_timeout_ms;
+    let requests = (1..timeout_ms / TICK_MS)
+        .flat_map(|step| bob.tick(2000 + step * TICK_MS, &mut rng))
+        .filter_map(|event| match event {
+            Event::Sync(bytes) => Some(Message::decode(&bytes[..]).unwrap().repair_request),
+            _ => None,
+        })
+        .filter(|requested| requested.iter().any(|entry| entry.message_id == "m1"))
+        .count();
+
+    assert!(requests >= 2);
 }
 
 #[test]

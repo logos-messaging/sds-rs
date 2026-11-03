@@ -2,10 +2,11 @@ use prost::Message as _;
 use rand_core::Rng;
 
 use crate::bloom::{hash_count_for, RollingBloomFilter};
-use crate::config::Config;
+use crate::config::{Config, Delivery};
 use crate::error::Error;
 use crate::event::Event;
 use crate::incoming::{has_dependencies, IncomingBuffer, PendingDelivery};
+use crate::missing::MissingMessages;
 use crate::outgoing::OutgoingBuffer;
 use crate::proto::{HistoryEntry, Message};
 use crate::repair::Repair;
@@ -26,6 +27,7 @@ pub struct Channel<S: Storage = InMemoryStorage> {
     bloom_hash_count: u32,
     outgoing: OutgoingBuffer,
     incoming: IncomingBuffer,
+    missing: MissingMessages,
     repair: Option<Repair>,
     last_activity_ms: u64,
     last_sent_ms: u64,
@@ -53,6 +55,7 @@ impl<S: Storage> Channel<S> {
             lamport_timestamp: 0,
             outgoing: OutgoingBuffer::default(),
             incoming: IncomingBuffer::default(),
+            missing: MissingMessages::default(),
             repair,
             last_activity_ms: 0,
             last_sent_ms: 0,
@@ -60,7 +63,7 @@ impl<S: Storage> Channel<S> {
         })
     }
 
-    /// Message IDs in the local log, in delivery order.
+    /// Message IDs in the local log, ordered by lamport timestamp then message ID.
     pub fn history(&self) -> Vec<String> {
         let entries = self.storage.latest(self.storage.message_count());
         entries.into_iter().map(|entry| entry.message_id).collect()
@@ -144,7 +147,10 @@ impl<S: Storage> Channel<S> {
             retrieval_hint,
             received_at_ms: now_ms,
         };
-        events.extend(self.deliver_or_buffer(delivery, now_ms));
+        events.extend(match self.config.delivery {
+            Delivery::Causal => self.deliver_or_buffer(delivery, now_ms),
+            Delivery::OnArrival => self.deliver_on_arrival(delivery, now_ms),
+        });
         Ok(events)
     }
 
@@ -152,6 +158,7 @@ impl<S: Storage> Channel<S> {
     pub fn tick(&mut self, now_ms: u64, rng: &mut impl Rng) -> Vec<Event> {
         let mut events = self.outgoing.sweep(now_ms, &self.config);
         events.extend(self.sweep_incoming(now_ms));
+        events.extend(self.sweep_missing(now_ms));
         events.extend(self.sweep_repair_responses(now_ms));
         if self.is_sync_due(now_ms) {
             events.push(self.send_sync(now_ms, rng));
@@ -229,6 +236,33 @@ impl<S: Storage> Channel<S> {
         events
     }
 
+    fn deliver_on_arrival(&mut self, delivery: PendingDelivery, now_ms: u64) -> Vec<Event> {
+        let message_id = delivery.message.message_id.clone();
+        let mut missing = self
+            .incoming
+            .missing_dependencies(&delivery.message, &self.storage);
+        missing.retain(|entry| entry.message_id != message_id);
+        self.missing.remove(&message_id);
+        let mut events = vec![self.deliver(delivery)];
+        if missing.is_empty() {
+            return events;
+        }
+        self.request_repairs(&missing, now_ms);
+        let dropped = self
+            .missing
+            .add(&missing, now_ms, self.config.max_incoming_buffer);
+        events.push(Event::MissingDependencies {
+            message_id,
+            missing,
+        });
+        events.extend(
+            dropped
+                .into_iter()
+                .map(|message_id| Event::Lost { message_id }),
+        );
+        events
+    }
+
     fn deliver_with_dependents(&mut self, delivery: PendingDelivery) -> Vec<Event> {
         let mut events = vec![self.deliver(delivery)];
         while let Some(ready) = self.incoming.take_ready(&self.storage) {
@@ -282,6 +316,16 @@ impl<S: Storage> Channel<S> {
         self.incoming
             .expire(now_ms, self.config.dependency_timeout_ms)
             .into_iter()
+            .map(|message_id| Event::Lost { message_id })
+            .collect()
+    }
+
+    fn sweep_missing(&mut self, now_ms: u64) -> Vec<Event> {
+        let lost = self
+            .missing
+            .expire(now_ms, self.config.dependency_timeout_ms);
+        self.request_repairs(&self.missing.entries(), now_ms);
+        lost.into_iter()
             .map(|message_id| Event::Lost { message_id })
             .collect()
     }

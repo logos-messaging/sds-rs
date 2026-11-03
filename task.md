@@ -27,7 +27,7 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 - **SDS-R `hash(a, b, ...)`:** `u64_be(SHA-256(len_be32(a) || a || len_be32(b) || b ...)[0..8])`. The length prefixes stop `("ab","c")` and `("a","bc")` colliding. Used for `T_req`, `T_resp` and response groups.
 
 ### Scope
-- Core SDS: send, receive, causal-dependency buffering, delivery ordered by lamport timestamp then message ID, ack review (causal history = acknowledged, bloom hit = possibly acknowledged), outgoing resend, periodic sync messages, ephemeral messages.
+- Core SDS: send, receive, causal-dependency buffering, log ordered by lamport timestamp then message ID, ack review (causal history = acknowledged, bloom hit = possibly acknowledged), outgoing resend, periodic sync messages, ephemeral messages.
 - Rolling bloom filter, rebuilt once it reaches capacity.
 - SDS-R (repair) is included, behind a config flag to turn it off.
 
@@ -46,7 +46,8 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 ### Protocol policy
 - A possibly-acknowledged message becomes acknowledged once it appears in bloom filters from 2 distinct senders.
 - An outgoing message is dropped after 5 resend attempts, emitting a `SendFailed` event.
-- An incoming message with unmet dependencies is dropped after 600s (2 × `T_max`, so at least one repair round can complete), emitting a `Lost` event. The incoming buffer is capped at 500.
+- Under `Delivery::Causal`, an incoming message with unmet dependencies is dropped after 600s (2 × `T_max`, so at least one repair round can complete), emitting a `Lost` event. The incoming buffer is capped at 500.
+- `Delivery::OnArrival`, opt-in, departs from the spec's buffering: a message is delivered and logged when it arrives, ahead of its dependencies. A dependency still missing 600s after the last delivered message naming it is reported `Lost`, and at most 500 are tracked. All participants in a channel must use the same delivery.
 - SDS-R caches full message bytes only for messages this participant is an eligible responder for. Max message size is 64 KB.
 
 ### Project setup
