@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 
+use crate::record::SDSRecord;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogEntry {
     pub message_id: String,
     pub lamport_timestamp: u64,
     pub sender_id: String,
     pub retrieval_hint: Option<Vec<u8>>,
-    /// Original wire bytes, kept only when this participant may answer repair requests.
-    pub wire_bytes: Option<Vec<u8>>,
+    /// The record as sent or received, kept only when this participant may answer repair requests.
+    pub record: Option<SDSRecord>,
 }
 
 /// The local log, ordered by lamport timestamp then message ID.
@@ -76,7 +78,7 @@ mod tests {
             lamport_timestamp,
             sender_id: "alice".into(),
             retrieval_hint: None,
-            wire_bytes: None,
+            record: None,
         }
     }
 
