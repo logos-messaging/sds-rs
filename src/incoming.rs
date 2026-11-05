@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 
+use crate::packet::Packet;
 use crate::proto::{HistoryEntry, Message};
 use crate::storage::Storage;
 
 pub struct PendingDelivery {
     pub message: Message,
     pub lamport_timestamp: u64,
-    pub wire_bytes: Vec<u8>,
+    pub packet: Packet,
     pub retrieval_hint: Option<Vec<u8>>,
     pub received_at_ms: u64,
 }

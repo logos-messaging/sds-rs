@@ -105,7 +105,7 @@ impl Repair {
         };
         let has_cached_message = storage
             .get(&request.message_id)
-            .is_some_and(|entry| entry.wire_bytes.is_some());
+            .is_some_and(|entry| entry.packet.is_some());
         if !has_cached_message || !self.is_responder(sender_id, &request.message_id) {
             return;
         }

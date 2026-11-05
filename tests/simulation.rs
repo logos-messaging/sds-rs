@@ -1,6 +1,6 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use sds::{Channel, Config, Event, OutgoingMessage};
+use sds::{Channel, Config, Event, OutgoingMessage, Packet};
 
 const PARTICIPANTS: [&str; 3] = ["alice", "bob", "carol"];
 const STEP_MS: u64 = 5_000;
@@ -10,7 +10,7 @@ const DROP_PERCENT: u64 = 10;
 
 struct Network {
     channels: Vec<Channel>,
-    in_flight: Vec<(usize, Vec<u8>)>,
+    in_flight: Vec<(usize, Packet)>,
     rng: StdRng,
 }
 
@@ -27,10 +27,10 @@ impl Network {
         }
     }
 
-    fn broadcast(&mut self, from: usize, wire_bytes: Vec<u8>) {
+    fn broadcast(&mut self, from: usize, packet: Packet) {
         for to in 0..self.channels.len() {
             if to != from {
-                self.in_flight.push((to, wire_bytes.clone()));
+                self.in_flight.push((to, packet.clone()));
             }
         }
     }
@@ -42,15 +42,15 @@ impl Network {
             content: message_id.into_bytes(),
             retrieval_hint: None,
         };
-        let wire_bytes = self.channels[from].send(message, step * STEP_MS).unwrap();
-        self.broadcast(from, wire_bytes);
+        let packet = self.channels[from].send(message, step * STEP_MS).unwrap();
+        self.broadcast(from, packet);
     }
 
     fn tick(&mut self, now_ms: u64) {
         for from in 0..self.channels.len() {
             for event in self.channels[from].tick(now_ms, &mut self.rng) {
-                if let Event::Resend(bytes) | Event::Sync(bytes) | Event::Repair(bytes) = event {
-                    self.broadcast(from, bytes);
+                if let Event::Resend(packet) | Event::Sync(packet) | Event::Repair(packet) = event {
+                    self.broadcast(from, packet);
                 }
             }
         }
@@ -59,13 +59,11 @@ impl Network {
     fn deliver_with_loss(&mut self, now_ms: u64) {
         let mut packets = std::mem::take(&mut self.in_flight);
         shuffle(&mut packets, &mut self.rng);
-        for (to, wire_bytes) in packets {
+        for (to, packet) in packets {
             if self.rng.next_u64() % 100 < DROP_PERCENT {
                 continue;
             }
-            self.channels[to]
-                .receive(&wire_bytes, None, now_ms)
-                .unwrap();
+            self.channels[to].receive(packet, None, now_ms).unwrap();
         }
     }
 }

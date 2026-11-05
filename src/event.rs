@@ -1,3 +1,4 @@
+use crate::packet::Packet;
 use crate::proto::HistoryEntry;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,7 +21,7 @@ pub enum Event {
     Lost {
         message_id: String,
     },
-    Resend(Vec<u8>),
-    Sync(Vec<u8>),
-    Repair(Vec<u8>),
+    Resend(Packet),
+    Sync(Packet),
+    Repair(Packet),
 }
