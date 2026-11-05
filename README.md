@@ -9,20 +9,22 @@ use sds::{Channel, Config, Event, OutgoingMessage};
 
 let mut channel = Channel::new(Config::new("alice", "my-channel"))?;
 
-// Send: broadcast the returned bytes on your transport.
-let wire_bytes = channel.send(
+// Send: broadcast the returned packet on your transport.
+let packet = channel.send(
     OutgoingMessage { message_id: "msg-1".into(), content: b"hi".to_vec(), retrieval_hint: None },
     now_ms,
 )?;
 
-// Receive: hand over bytes from the transport, act on the events.
-for event in channel.receive(&incoming_bytes, None, now_ms)? { /* ... */ }
+// Receive: hand over a packet from the transport, act on the events.
+for event in channel.receive(incoming_packet, None, now_ms)? { /* ... */ }
 
-// Every few seconds: broadcast any Resend / Sync / Repair bytes.
+// Every few seconds: broadcast any Resend / Sync / Repair packets.
 for event in channel.tick(now_ms, &mut rng) { /* ... */ }
 ```
 
 The library has no threads, timers or I/O. The caller supplies the time, the randomness and the transport.
+
+A `Packet` is the encoded header with the content beside it, so a transport can carry the content apart, for instance encrypted. `Packet::to_bytes` and `Packet::from_bytes` convert to and from the spec's single `Message`.
 
 ## Interoperability
 

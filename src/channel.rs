@@ -7,6 +7,7 @@ use crate::error::Error;
 use crate::event::Event;
 use crate::incoming::{has_dependencies, IncomingBuffer, PendingDelivery};
 use crate::outgoing::OutgoingBuffer;
+use crate::packet::Packet;
 use crate::proto::{HistoryEntry, Message};
 use crate::repair::Repair;
 use crate::storage::{InMemoryStorage, LogEntry, Storage};
@@ -66,49 +67,55 @@ impl<S: Storage> Channel<S> {
         entries.into_iter().map(|entry| entry.message_id).collect()
     }
 
-    /// Returns the wire bytes to broadcast.
-    pub fn send(&mut self, message: OutgoingMessage, now_ms: u64) -> Result<Vec<u8>, Error> {
+    /// Returns the packet to broadcast.
+    pub fn send(&mut self, message: OutgoingMessage, now_ms: u64) -> Result<Packet, Error> {
         self.check_outgoing_content(&message.content)?;
         let OutgoingMessage {
             message_id,
             content,
             retrieval_hint,
         } = message;
-        let wire_bytes = self
-            .build_message(message_id.clone(), Some(content), now_ms)
-            .encode_to_vec();
+        let packet = Packet {
+            header: self
+                .build_message(message_id.clone(), now_ms)
+                .encode_to_vec(),
+            content: Some(content),
+        };
         self.record_in_log(LogEntry {
             message_id: message_id.clone(),
             lamport_timestamp: self.lamport_timestamp,
             sender_id: self.config.participant_id.clone(),
             retrieval_hint,
-            wire_bytes: self.repair.is_some().then(|| wire_bytes.clone()),
+            packet: self.repair.is_some().then(|| packet.clone()),
         });
-        self.outgoing.add(message_id, wire_bytes.clone(), now_ms);
+        self.outgoing.add(message_id, packet.clone(), now_ms);
         self.mark_sent(now_ms);
-        Ok(wire_bytes)
+        Ok(packet)
     }
 
-    /// Returns the wire bytes of a message sent without ordering or delivery guarantees.
-    pub fn send_ephemeral(&self, message_id: String, content: Vec<u8>) -> Result<Vec<u8>, Error> {
+    /// Returns the packet of a message sent without ordering or delivery guarantees.
+    pub fn send_ephemeral(&self, message_id: String, content: Vec<u8>) -> Result<Packet, Error> {
         self.check_outgoing_content(&content)?;
-        let message = Message {
+        let header = Message {
             sender_id: self.config.participant_id.clone(),
             message_id,
             channel_id: self.config.channel_id.clone(),
-            content: Some(content),
             ..Default::default()
         };
-        Ok(message.encode_to_vec())
+        Ok(Packet {
+            header: header.encode_to_vec(),
+            content: Some(content),
+        })
     }
 
     pub fn receive(
         &mut self,
-        wire_bytes: &[u8],
+        packet: Packet,
         retrieval_hint: Option<Vec<u8>>,
         now_ms: u64,
     ) -> Result<Vec<Event>, Error> {
-        let message = Message::decode(wire_bytes)?;
+        let mut message = Message::decode(packet.header.as_slice())?;
+        message.content = packet.content.clone();
         self.check_incoming(&message)?;
         if let Some(repair) = &mut self.repair {
             repair.on_message_received(&message.message_id);
@@ -140,7 +147,7 @@ impl<S: Storage> Channel<S> {
         let delivery = PendingDelivery {
             message,
             lamport_timestamp,
-            wire_bytes: wire_bytes.to_vec(),
+            packet,
             retrieval_hint,
             received_at_ms: now_ms,
         };
@@ -159,12 +166,7 @@ impl<S: Storage> Channel<S> {
         events
     }
 
-    fn build_message(
-        &mut self,
-        message_id: String,
-        content: Option<Vec<u8>>,
-        now_ms: u64,
-    ) -> Message {
+    fn build_message(&mut self, message_id: String, now_ms: u64) -> Message {
         self.lamport_timestamp = now_ms.max(self.lamport_timestamp + 1);
         let repair_request = match &mut self.repair {
             Some(repair) => repair.take_due_requests(now_ms),
@@ -178,7 +180,7 @@ impl<S: Storage> Channel<S> {
             causal_history: self.causal_history(),
             bloom_filter: Some(self.bloom.as_bytes().to_vec()),
             repair_request,
-            content,
+            content: None,
         }
     }
 
@@ -254,7 +256,7 @@ impl<S: Storage> Channel<S> {
             lamport_timestamp: delivery.lamport_timestamp,
             sender_id: sender_id.clone(),
             retrieval_hint: delivery.retrieval_hint,
-            wire_bytes: is_responder.then_some(delivery.wire_bytes),
+            packet: is_responder.then_some(delivery.packet),
         });
         Event::MessageReady {
             message_id,
@@ -293,7 +295,7 @@ impl<S: Storage> Channel<S> {
         repair
             .take_due_responses(now_ms)
             .iter()
-            .filter_map(|message_id| self.storage.get(message_id)?.wire_bytes)
+            .filter_map(|message_id| self.storage.get(message_id)?.packet)
             .map(Event::Repair)
             .collect()
     }
@@ -311,7 +313,7 @@ impl<S: Storage> Channel<S> {
     }
 
     fn send_sync(&mut self, now_ms: u64, rng: &mut impl Rng) -> Event {
-        let mut message = self.build_message(String::new(), None, now_ms);
+        let mut message = self.build_message(String::new(), now_ms);
         message.message_id = format!(
             "sync-{}-{}",
             self.config.participant_id, self.lamport_timestamp
@@ -319,7 +321,10 @@ impl<S: Storage> Channel<S> {
         self.mark_sent(now_ms);
         // Random backoff so a whole group does not sync in the same instant.
         self.sync_jitter_ms = rng.next_u64() % (self.config.sync_interval_ms / 2 + 1);
-        Event::Sync(message.encode_to_vec())
+        Event::Sync(Packet {
+            header: message.encode_to_vec(),
+            content: None,
+        })
     }
 
     fn mark_sent(&mut self, now_ms: u64) {
