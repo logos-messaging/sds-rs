@@ -19,6 +19,7 @@ There is an existing nim implementation here https://github.com/logos-messaging/
 ### Wire format
 - Match the spec's protobuf definitions exactly (field numbers, types, optionality).
 - Use `prost` with hand-written derive structs, so no `build.rs` / `protoc` is required.
+- Send, receive and the broadcast events carry an `SDSRecord`: the encoded `Message` with `content` unset, and the content beside it, so a transport can carry the content apart (detached content, as in RFC 7515 appendix F). `SDSRecord::to_bytes` and `SDSRecord::from_bytes` convert to and from the spec's single `Message`.
 - `bloom_filter` is the raw bit array. The bit count `m` is `bytes.len() * 8`; the hash count `k` is part of the channel config and must be shared by all participants.
 
 ### Hashing
@@ -40,14 +41,14 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 - Defaults: causal history 10, local history 500, bloom 200 @ 0.1%, resend 60s, T_min 30s, T_max 300s, max 3 repair requests.
 - Message IDs are supplied by the caller (e.g. the transport's message hash).
 - Retrieval hints are optional, supplied by the caller on send and receive, and stored for use in later causal history entries.
-- Resends, sync messages and repair rebroadcasts are returned from `tick` as encoded bytes ready to broadcast.
+- Resends, sync messages and repair rebroadcasts are returned from `tick` as records ready to broadcast.
 - Randomness (sync backoff) comes from a caller-supplied RNG (`rand_core::RngCore`).
 
 ### Protocol policy
 - A possibly-acknowledged message becomes acknowledged once it appears in bloom filters from 2 distinct senders.
 - An outgoing message is dropped after 5 resend attempts, emitting a `SendFailed` event.
 - An incoming message with unmet dependencies is dropped after 600s (2 × `T_max`, so at least one repair round can complete), emitting a `Lost` event. The incoming buffer is capped at 500.
-- SDS-R caches full message bytes only for messages this participant is an eligible responder for. Max message size is 64 KB.
+- SDS-R caches the full record only for messages this participant is an eligible responder for. Max message size is 64 KB.
 
 ### Project setup
 - Crate `sds`, Rust edition 2021, latest stable compiler, MIT/Apache-2.0 dual licence.

@@ -4,13 +4,14 @@ use crate::bloom::BloomFilter;
 use crate::config::Config;
 use crate::event::Event;
 use crate::proto::Message;
+use crate::record::SDSRecord;
 
 // Possibly-acknowledged messages have likely reached someone, so unacknowledged ones resend first.
 const POSSIBLY_ACKED_RESEND_FACTOR: u64 = 2;
 
 struct PendingSend {
     message_id: String,
-    wire_bytes: Vec<u8>,
+    record: SDSRecord,
     last_sent_ms: u64,
     resend_count: u32,
     bloom_ackers: HashSet<String>,
@@ -45,10 +46,10 @@ pub struct OutgoingBuffer {
 }
 
 impl OutgoingBuffer {
-    pub fn add(&mut self, message_id: String, wire_bytes: Vec<u8>, now_ms: u64) {
+    pub fn add(&mut self, message_id: String, record: SDSRecord, now_ms: u64) {
         self.pending.push(PendingSend {
             message_id,
-            wire_bytes,
+            record,
             last_sent_ms: now_ms,
             resend_count: 0,
             bloom_ackers: HashSet::new(),
@@ -92,7 +93,7 @@ impl OutgoingBuffer {
             }
             send.resend_count += 1;
             send.last_sent_ms = now_ms;
-            events.push(Event::Resend(send.wire_bytes.clone()));
+            events.push(Event::Resend(send.record.clone()));
             true
         });
         events

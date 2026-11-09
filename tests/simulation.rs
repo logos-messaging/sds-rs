@@ -1,6 +1,6 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use sds::{Channel, Config, Event, OutgoingMessage};
+use sds::{Channel, Config, Event, OutgoingMessage, SDSRecord};
 
 const PARTICIPANTS: [&str; 3] = ["alice", "bob", "carol"];
 const STEP_MS: u64 = 5_000;
@@ -10,7 +10,7 @@ const DROP_PERCENT: u64 = 10;
 
 struct Network {
     channels: Vec<Channel>,
-    in_flight: Vec<(usize, Vec<u8>)>,
+    in_flight: Vec<(usize, SDSRecord)>,
     rng: StdRng,
 }
 
@@ -27,10 +27,10 @@ impl Network {
         }
     }
 
-    fn broadcast(&mut self, from: usize, wire_bytes: Vec<u8>) {
+    fn broadcast(&mut self, from: usize, record: SDSRecord) {
         for to in 0..self.channels.len() {
             if to != from {
-                self.in_flight.push((to, wire_bytes.clone()));
+                self.in_flight.push((to, record.clone()));
             }
         }
     }
@@ -42,30 +42,28 @@ impl Network {
             content: message_id.into_bytes(),
             retrieval_hint: None,
         };
-        let wire_bytes = self.channels[from].send(message, step * STEP_MS).unwrap();
-        self.broadcast(from, wire_bytes);
+        let record = self.channels[from].send(message, step * STEP_MS).unwrap();
+        self.broadcast(from, record);
     }
 
     fn tick(&mut self, now_ms: u64) {
         for from in 0..self.channels.len() {
             for event in self.channels[from].tick(now_ms, &mut self.rng) {
-                if let Event::Resend(bytes) | Event::Sync(bytes) | Event::Repair(bytes) = event {
-                    self.broadcast(from, bytes);
+                if let Event::Resend(record) | Event::Sync(record) | Event::Repair(record) = event {
+                    self.broadcast(from, record);
                 }
             }
         }
     }
 
     fn deliver_with_loss(&mut self, now_ms: u64) {
-        let mut packets = std::mem::take(&mut self.in_flight);
-        shuffle(&mut packets, &mut self.rng);
-        for (to, wire_bytes) in packets {
+        let mut records = std::mem::take(&mut self.in_flight);
+        shuffle(&mut records, &mut self.rng);
+        for (to, record) in records {
             if self.rng.next_u64() % 100 < DROP_PERCENT {
                 continue;
             }
-            self.channels[to]
-                .receive(&wire_bytes, None, now_ms)
-                .unwrap();
+            self.channels[to].receive(record, None, now_ms).unwrap();
         }
     }
 }

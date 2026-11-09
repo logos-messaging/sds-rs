@@ -9,20 +9,22 @@ use sds::{Channel, Config, Event, OutgoingMessage};
 
 let mut channel = Channel::new(Config::new("alice", "my-channel"))?;
 
-// Send: broadcast the returned bytes on your transport.
-let wire_bytes = channel.send(
+// Send: broadcast the returned record on your transport.
+let record = channel.send(
     OutgoingMessage { message_id: "msg-1".into(), content: b"hi".to_vec(), retrieval_hint: None },
     now_ms,
 )?;
 
-// Receive: hand over bytes from the transport, act on the events.
-for event in channel.receive(&incoming_bytes, None, now_ms)? { /* ... */ }
+// Receive: hand over a record from the transport, act on the events.
+for event in channel.receive(incoming_record, None, now_ms)? { /* ... */ }
 
-// Every few seconds: broadcast any Resend / Sync / Repair bytes.
+// Every few seconds: broadcast any Resend / Sync / Repair records.
 for event in channel.tick(now_ms, &mut rng) { /* ... */ }
 ```
 
 The library has no threads, timers or I/O. The caller supplies the time, the randomness and the transport.
+
+An `SDSRecord` is the encoded header with the content beside it, so a transport can carry the content apart, for instance encrypted. `SDSRecord::to_bytes` and `SDSRecord::from_bytes` convert to and from the spec's single `Message`.
 
 ## Interoperability
 
