@@ -12,7 +12,7 @@ mod repair;
 mod storage;
 
 pub use channel::{Channel, OutgoingMessage};
-pub use config::{Config, RepairConfig};
+pub use config::{Config, RepairConfig, StartPoint};
 pub use error::Error;
 pub use event::Event;
 pub use record::SDSRecord;

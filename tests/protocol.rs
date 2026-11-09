@@ -2,7 +2,7 @@ use prost::Message as _;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use sds::proto::Message;
-use sds::{Channel, Config, Error, Event, OutgoingMessage, SDSRecord};
+use sds::{Channel, Config, Error, Event, OutgoingMessage, SDSRecord, StartPoint};
 
 const CHANNEL_ID: &str = "chan";
 const MINUTE_MS: u64 = 60_000;
@@ -42,6 +42,16 @@ fn sync_record(events: &[Event]) -> SDSRecord {
             _ => None,
         })
         .expect("tick should produce a sync message")
+}
+
+fn joiner(participant_id: &str, start: &SDSRecord) -> Channel {
+    let header = Message::decode(start.header.as_slice()).unwrap();
+    let mut config = Config::new(participant_id, CHANNEL_ID);
+    config.start = Some(StartPoint {
+        message_id: header.message_id,
+        lamport_timestamp: header.lamport_timestamp.unwrap(),
+    });
+    Channel::new(config).unwrap()
 }
 
 #[test]
@@ -312,4 +322,177 @@ fn repairs_message_missed_by_one_participant() {
 
     let events = carol.receive(repair, None, request_time_ms).unwrap();
     assert_eq!(ready_ids(&events), ["m1", "m2"]);
+}
+
+#[test]
+fn starts_the_clock_at_the_start_point() {
+    let mut alice = channel("alice");
+    let start = send(&mut alice, "start", 5000);
+    let mut carol = joiner("carol", &start);
+
+    let sent = send(&mut carol, "m1", 1000);
+
+    let header = Message::decode(sent.header.as_slice()).unwrap();
+    assert_eq!(header.lamport_timestamp, Some(5001));
+}
+
+#[test]
+fn never_acknowledges_the_start_point() {
+    let mut alice = channel("alice");
+    let start = send(&mut alice, "start", 0);
+    let mut carol = joiner("carol", &start);
+    let mut rng = rng();
+
+    let sync = sync_record(&carol.tick(MINUTE_MS / 2, &mut rng));
+    alice.receive(sync, None, MINUTE_MS / 2).unwrap();
+    let events = alice.tick(MINUTE_MS, &mut rng);
+
+    assert!(events.contains(&Event::Resend(start)));
+}
+
+#[test]
+fn names_nothing_from_before_the_start_point() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    let b1 = send(&mut bob, "b1", 1000);
+    let start = send(&mut alice, "start", 2000);
+    bob.receive(start.clone(), None, 2000).unwrap();
+    let mut carol = joiner("carol", &start);
+    carol.receive(b1, None, 3000).unwrap();
+    carol.receive(start, None, 3000).unwrap();
+    carol
+        .receive(send(&mut bob, "b2", 3000), None, 3000)
+        .unwrap();
+
+    let sent = send(&mut carol, "c1", 4000);
+
+    let header = Message::decode(sent.header.as_slice()).unwrap();
+    let named: Vec<_> = header
+        .causal_history
+        .iter()
+        .map(|entry| entry.message_id.as_str())
+        .collect();
+    assert_eq!(named, ["b2"]);
+}
+
+#[test]
+fn never_releases_the_start_point() {
+    let mut alice = channel("alice");
+    let start = send(&mut alice, "start", 5000);
+    let mut carol = joiner("carol", &start);
+
+    assert!(carol.receive(start, None, 5000).unwrap().is_empty());
+}
+
+#[test]
+fn never_releases_a_message_stamped_with_the_start_points_timestamp() {
+    let mut alice = channel("alice");
+    let mut dave = channel("dave");
+    let start = send(&mut alice, "start", 2000);
+    let tie = send(&mut dave, "tie", 2000);
+    let mut carol = joiner("carol", &start);
+
+    assert!(carol.receive(tie, None, 2000).unwrap().is_empty());
+}
+
+#[test]
+fn releases_a_message_whose_history_names_the_start_point() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    bob.receive(send(&mut alice, "m1", 1000), None, 1000)
+        .unwrap();
+    let start = send(&mut alice, "start", 2000);
+    bob.receive(start.clone(), None, 2000).unwrap();
+    let mut carol = joiner("carol", &start);
+
+    let events = carol
+        .receive(send(&mut bob, "m2", 3000), None, 3000)
+        .unwrap();
+
+    assert_eq!(
+        events,
+        [Event::MessageReady {
+            message_id: "m2".into(),
+            sender_id: "bob".into(),
+            content: b"m2".to_vec()
+        }]
+    );
+    assert_eq!(carol.history(), ["m2"]);
+}
+
+#[test]
+fn never_requests_what_precedes_the_start_point() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    let mut dave = channel("dave");
+    let mut rng = rng();
+    let m1 = send(&mut alice, "m1", 1000);
+    bob.receive(m1.clone(), None, 1000).unwrap();
+    dave.receive(m1, None, 1000).unwrap();
+    let start = send(&mut alice, "start", 2 * MINUTE_MS);
+    bob.receive(start.clone(), None, 2 * MINUTE_MS).unwrap();
+    let mut carol = joiner("carol", &start);
+
+    let lagging_sync = sync_record(&dave.tick(MINUTE_MS, &mut rng));
+    let sync = sync_record(&bob.tick(3 * MINUTE_MS, &mut rng));
+    carol.receive(lagging_sync, None, 3 * MINUTE_MS).unwrap();
+    carol.receive(sync, None, 3 * MINUTE_MS).unwrap();
+
+    let request_time_ms = 3 * MINUTE_MS + 5 * MINUTE_MS;
+    let carol_sync = sync_record(&carol.tick(request_time_ms, &mut rng));
+    let requested = Message::decode(carol_sync.header.as_slice())
+        .unwrap()
+        .repair_request;
+    assert!(requested.is_empty());
+}
+
+#[test]
+fn waits_on_a_history_that_does_not_name_the_start_point() {
+    let mut alice = channel("alice");
+    let mut dave = channel("dave");
+    dave.receive(send(&mut alice, "m1", 1000), None, 1000)
+        .unwrap();
+    let start = send(&mut alice, "start", 2000);
+    let mut carol = joiner("carol", &start);
+
+    let events = carol
+        .receive(send(&mut dave, "d1", 3000), None, 3000)
+        .unwrap();
+
+    assert!(ready_ids(&events).is_empty());
+    assert!(
+        matches!(&events[0], Event::MissingDependencies { missing, .. } if missing[0].message_id == "m1")
+    );
+}
+
+#[test]
+fn logs_without_releasing_a_message_from_before_the_start_point() {
+    let mut alice = channel("alice");
+    let mut dave = channel("dave");
+    dave.receive(send(&mut alice, "m1", 1000), None, 1000)
+        .unwrap();
+    let d1 = send(&mut dave, "d1", 1500);
+    let start = send(&mut alice, "start", 2000);
+    let mut carol = joiner("carol", &start);
+
+    let events = carol.receive(d1, None, 2000).unwrap();
+
+    assert!(events.is_empty());
+    assert_eq!(carol.history(), ["d1"]);
+}
+
+#[test]
+fn releases_what_waits_on_a_message_from_before_the_start_point() {
+    let mut alice = channel("alice");
+    let mut dave = channel("dave");
+    let d1 = send(&mut dave, "d1", 1000);
+    let d2 = send(&mut dave, "d2", 3000);
+    let start = send(&mut alice, "start", 2000);
+    let mut carol = joiner("carol", &start);
+
+    carol.receive(d2, None, 3000).unwrap();
+    let events = carol.receive(d1, None, 3000).unwrap();
+
+    assert_eq!(ready_ids(&events), ["d2"]);
+    assert_eq!(carol.history(), ["d1", "d2"]);
 }

@@ -46,12 +46,16 @@ impl<S: Storage> Channel<S> {
             .repair
             .clone()
             .map(|repair_config| Repair::new(repair_config, config.participant_id.clone()));
+        let lamport_timestamp = config
+            .start
+            .as_ref()
+            .map_or(0, |start| start.lamport_timestamp);
         Ok(Self {
             bloom: RollingBloomFilter::new(config.bloom_capacity, config.bloom_error_rate),
             bloom_hash_count: hash_count_for(config.bloom_capacity, config.bloom_error_rate),
             config,
             storage,
-            lamport_timestamp: 0,
+            lamport_timestamp,
             outgoing: OutgoingBuffer::default(),
             incoming: IncomingBuffer::default(),
             repair,
@@ -61,7 +65,7 @@ impl<S: Storage> Channel<S> {
         })
     }
 
-    /// Message IDs in the local log, in delivery order.
+    /// Message IDs in the local log, oldest first.
     pub fn history(&self) -> Vec<String> {
         let entries = self.storage.latest(self.storage.message_count());
         entries.into_iter().map(|entry| entry.message_id).collect()
@@ -137,6 +141,11 @@ impl<S: Storage> Channel<S> {
         if let Some(repair) = &mut self.repair {
             repair.on_repair_requests(&message.repair_request, &self.storage, now_ms);
         }
+        if !self.is_after_start(lamport_timestamp) {
+            events.extend(self.log_before_start(message, lamport_timestamp, retrieval_hint));
+            return Ok(events);
+        }
+        self.skip_history_before_start(&mut message);
         if !has_content(&message) {
             let missing = self.incoming.missing_dependencies(&message, &self.storage);
             self.request_repairs(&missing, now_ms);
@@ -184,11 +193,14 @@ impl<S: Storage> Channel<S> {
         }
     }
 
+    // Nothing stamped at or before the start was delivered here, and naming it would hold back
+    // this participant's messages wherever it is missing.
     fn causal_history(&self) -> Vec<HistoryEntry> {
         let is_repair_enabled = self.repair.is_some();
         self.storage
             .latest(self.config.max_causal_history)
             .into_iter()
+            .filter(|entry| self.is_after_start(entry.lamport_timestamp))
             .map(|entry| HistoryEntry {
                 message_id: entry.message_id,
                 retrieval_hint: entry.retrieval_hint,
@@ -207,6 +219,51 @@ impl<S: Storage> Channel<S> {
             .into_iter()
             .map(|message_id| Event::MessageAcknowledged { message_id })
             .collect()
+    }
+
+    // A participant that has delivered the start stamps its sends after it.
+    fn is_after_start(&self, lamport_timestamp: u64) -> bool {
+        self.config
+            .start
+            .as_ref()
+            .is_none_or(|start| lamport_timestamp > start.lamport_timestamp)
+    }
+
+    // Logged at once rather than held, as its history is from before the start too. It keeps no
+    // record, so this participant answers no repair with it.
+    fn log_before_start(
+        &mut self,
+        message: Message,
+        lamport_timestamp: u64,
+        retrieval_hint: Option<Vec<u8>>,
+    ) -> Vec<Event> {
+        if !has_content(&message) {
+            return Vec::new();
+        }
+        self.bloom.insert(&message.message_id);
+        self.record_in_log(LogEntry {
+            message_id: message.message_id,
+            lamport_timestamp,
+            sender_id: message.sender_id,
+            retrieval_hint,
+            record: None,
+        });
+        self.deliver_ready()
+    }
+
+    // A history lists IDs oldest first, so the start and those it lists before it are all met.
+    fn skip_history_before_start(&self, message: &mut Message) {
+        let Some(start) = &self.config.start else {
+            return;
+        };
+        let Some(start_index) = message
+            .causal_history
+            .iter()
+            .position(|entry| entry.message_id == start.message_id)
+        else {
+            return;
+        };
+        message.causal_history.drain(..=start_index);
     }
 
     fn deliver_or_buffer(&mut self, delivery: PendingDelivery, now_ms: u64) -> Vec<Event> {
@@ -233,6 +290,12 @@ impl<S: Storage> Channel<S> {
 
     fn deliver_with_dependents(&mut self, delivery: PendingDelivery) -> Vec<Event> {
         let mut events = vec![self.deliver(delivery)];
+        events.extend(self.deliver_ready());
+        events
+    }
+
+    fn deliver_ready(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
         while let Some(ready) = self.incoming.take_ready(&self.storage) {
             events.push(self.deliver(ready));
         }

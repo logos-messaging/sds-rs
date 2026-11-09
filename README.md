@@ -26,9 +26,15 @@ The library has no threads, timers or I/O. The caller supplies the time, the ran
 
 An `SDSRecord` is the encoded header with the content beside it, so a transport can carry the content apart, for instance encrypted. `SDSRecord::to_bytes` and `SDSRecord::from_bytes` convert to and from the spec's single `Message`.
 
+## Joining a channel under way
+
+A participant joining a channel that already has history sets `config.start` to a `StartPoint`, a message such as the one that admitted it. Its clock starts at that message's timestamp. Nothing stamped at or before that timestamp is released or named in the participant's own histories: such a message is logged on arrival. The start point and the IDs a history lists before it count as delivered, so they are never waited for or requested.
+
+Pick a message every participant delivers before sending anything the joiner is to receive. A message whose history lists older IDs without naming the start point waits for them as usual. A history lists messages with equal timestamps by ID, so one stamped with the start point's own timestamp and a greater ID is listed after it: it is waited for, though never released.
+
 ## Interoperability
 
-Messages use the spec's protobuf definitions exactly. The spec leaves the hash functions open, so this crate defines them below. Any implementation joining the same channel must use the same hashes and the same `bloom_capacity`, `bloom_error_rate` and SDS-R settings.
+Messages use the spec's protobuf definitions exactly. The spec leaves the hash functions open, so this crate defines them below. Any implementation joining the same channel must use the same hashes and the same `bloom_capacity`, `bloom_error_rate` and SDS-R settings, and list a causal history oldest first, an order the spec leaves open but a start point relies on.
 
 `u64_be(bytes)` reads 8 bytes as a big-endian unsigned integer.
 
