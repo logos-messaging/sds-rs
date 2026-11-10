@@ -33,6 +33,7 @@ pub struct Config {
     pub max_incoming_buffer: usize,
     pub max_content_size: usize,
     pub repair: Option<RepairConfig>,
+    pub start: Option<StartPoint>,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,15 @@ pub struct RepairConfig {
     pub t_max_ms: u64,
     pub num_response_groups: u64,
     pub max_repair_requests: usize,
+}
+
+/// The message a participant joining a channel under way starts at: nothing stamped at or before
+/// it is released, or named in this participant's histories. Each participant should deliver it
+/// before sending anything the joiner is to receive.
+#[derive(Clone, Debug)]
+pub struct StartPoint {
+    pub message_id: String,
+    pub lamport_timestamp: u64,
 }
 
 impl Config {
@@ -60,6 +70,7 @@ impl Config {
             max_incoming_buffer: DEFAULT_MAX_INCOMING_BUFFER,
             max_content_size: DEFAULT_MAX_CONTENT_SIZE,
             repair: Some(RepairConfig::default()),
+            start: None,
         }
     }
 

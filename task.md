@@ -49,6 +49,7 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 - An outgoing message is dropped after 5 resend attempts, emitting a `SendFailed` event.
 - An incoming message with unmet dependencies is dropped after 600s (2 × `T_max`, so at least one repair round can complete), emitting a `Lost` event. The incoming buffer is capped at 500.
 - SDS-R caches the full record only for messages this participant is an eligible responder for. Max message size is 64 KB.
+- A participant joining a channel under way may start at a message such as the one that admitted it (`Config::start`): its clock starts at its timestamp. A message stamped at or before it is logged on arrival, without its record, never released and never named in this participant's causal histories, and the start and the IDs a history lists before it count as met. This departs from the spec, where only the local log meets a dependency.
 
 ### Project setup
 - Crate `sds`, Rust edition 2021, latest stable compiler, MIT/Apache-2.0 dual licence.
