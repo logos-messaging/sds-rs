@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::config::RepairConfig;
 use crate::hash::hash_fields;
-use crate::proto::HistoryEntry;
+use crate::header::HistoryEntry;
 use crate::storage::Storage;
 
 struct PendingRequest {

@@ -17,9 +17,8 @@ There is an existing nim implementation here https://github.com/logos-messaging/
 ## Decisions
 
 ### Wire format
-- Match the spec's protobuf definitions exactly (field numbers, types, optionality).
-- Use `prost` with hand-written derive structs, so no `build.rs` / `protoc` is required.
-- Send, receive and the broadcast events carry an `SDSRecord`: the encoded `Message` with `content` unset, and the content beside it, so a transport can carry the content apart (detached content, as in RFC 7515 appendix F). `SDSRecord::to_bytes` and `SDSRecord::from_bytes` convert to and from the spec's single `Message`.
+- The crate has no wire format of its own: the caller encodes and decodes records, as the spec's protobuf `Message` to interoperate. `Header` and `HistoryEntry` mirror the spec's fields and optionality.
+- Send, receive and the broadcast events carry an `SDSRecord`: the `Header`, the spec's `Message` without `content`, and the content beside it, so a transport can carry the content apart (detached content, as in RFC 7515 appendix F).
 - `bloom_filter` is the raw bit array. The bit count `m` is `bytes.len() * 8`; the hash count `k` is part of the channel config and must be shared by all participants.
 
 ### Hashing
@@ -53,7 +52,7 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 
 ### Project setup
 - Crate `sds`, Rust edition 2021, latest stable compiler, MIT/Apache-2.0 dual licence.
-- Dependencies: `prost`, `sha2`, `rand_core`.
+- Dependencies: `sha2`, `rand_core`.
 
 
 ## Done Criteria
@@ -61,7 +60,6 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 - `cargo test` passes, `cargo clippy` is clean, `cargo fmt` applied.
 - Unit tests for each protocol step in the spec (send, receive, deliver, conflict resolution, ack review, buffer sweeps, sync, ephemeral, every SDS-R rule).
 - Multi-participant simulation tests with message loss and reordering show that all participants converge to the same log.
-- Protobuf encode/decode round-trips, and encoded bytes match the spec's field numbers.
 - Hash test vectors are fixed in tests and in the README.
 
 Out of scope: nim-sds interop, persistence backends beyond in-memory, FFI.

@@ -1,7 +1,5 @@
-use prost::Message as _;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use sds::proto::Message;
 use sds::{Channel, Config, Error, Event, OutgoingMessage, SDSRecord, StartPoint};
 
 const CHANNEL_ID: &str = "chan";
@@ -45,11 +43,10 @@ fn sync_record(events: &[Event]) -> SDSRecord {
 }
 
 fn joiner(participant_id: &str, start: &SDSRecord) -> Channel {
-    let header = Message::decode(start.header.as_slice()).unwrap();
     let mut config = Config::new(participant_id, CHANNEL_ID);
     config.start = Some(StartPoint {
-        message_id: header.message_id,
-        lamport_timestamp: header.lamport_timestamp.unwrap(),
+        message_id: start.header.message_id.clone(),
+        lamport_timestamp: start.header.lamport_timestamp.unwrap(),
     });
     Channel::new(config).unwrap()
 }
@@ -61,9 +58,7 @@ fn sends_the_content_beside_the_header() {
     let record = send(&mut alice, "m1", 1000);
 
     assert_eq!(record.content, Some(b"m1".to_vec()));
-    let header = Message::decode(record.header.as_slice()).unwrap();
-    assert_eq!(header.message_id, "m1");
-    assert!(header.content.is_none());
+    assert_eq!(record.header.message_id, "m1");
 }
 
 #[test]
@@ -305,10 +300,7 @@ fn repairs_message_missed_by_one_participant() {
 
     let request_time_ms = 2000 + 5 * MINUTE_MS;
     let sync = sync_record(&carol.tick(request_time_ms, &mut rng));
-    let requested = Message::decode(sync.header.as_slice())
-        .unwrap()
-        .repair_request;
-    assert_eq!(requested[0].message_id, "m1");
+    assert_eq!(sync.header.repair_request[0].message_id, "m1");
 
     alice.receive(sync, None, request_time_ms).unwrap();
     let repair = alice
@@ -332,8 +324,7 @@ fn starts_the_clock_at_the_start_point() {
 
     let sent = send(&mut carol, "m1", 1000);
 
-    let header = Message::decode(sent.header.as_slice()).unwrap();
-    assert_eq!(header.lamport_timestamp, Some(5001));
+    assert_eq!(sent.header.lamport_timestamp, Some(5001));
 }
 
 #[test]
@@ -366,8 +357,8 @@ fn names_nothing_from_before_the_start_point() {
 
     let sent = send(&mut carol, "c1", 4000);
 
-    let header = Message::decode(sent.header.as_slice()).unwrap();
-    let named: Vec<_> = header
+    let named: Vec<_> = sent
+        .header
         .causal_history
         .iter()
         .map(|entry| entry.message_id.as_str())
@@ -440,10 +431,7 @@ fn never_requests_what_precedes_the_start_point() {
 
     let request_time_ms = 3 * MINUTE_MS + 5 * MINUTE_MS;
     let carol_sync = sync_record(&carol.tick(request_time_ms, &mut rng));
-    let requested = Message::decode(carol_sync.header.as_slice())
-        .unwrap()
-        .repair_request;
-    assert!(requested.is_empty());
+    assert!(carol_sync.header.repair_request.is_empty());
 }
 
 #[test]
