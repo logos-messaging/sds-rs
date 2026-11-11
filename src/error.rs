@@ -6,6 +6,7 @@ pub enum Error {
     ContentTooLarge { size: usize, max: usize },
     WrongChannel { expected: String, actual: String },
     InvalidConfig(&'static str),
+    UnknownMessage(String),
 }
 
 impl fmt::Display for Error {
@@ -19,6 +20,9 @@ impl fmt::Display for Error {
                 write!(f, "message for channel {actual}, expected {expected}")
             }
             Error::InvalidConfig(reason) => write!(f, "invalid config: {reason}"),
+            Error::UnknownMessage(message_id) => {
+                write!(f, "message {message_id} is not in the log")
+            }
         }
     }
 }

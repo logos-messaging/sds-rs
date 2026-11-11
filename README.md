@@ -15,6 +15,9 @@ let record = channel.send(
     now_ms,
 )?;
 
+// A hint the transport gives only once the record is sent rides in later histories.
+channel.set_retrieval_hint("msg-1", retrieval_hint)?;
+
 // Receive: hand over a record from the transport, act on the events.
 for event in channel.receive(incoming_record, None, now_ms)? { /* ... */ }
 

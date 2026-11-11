@@ -100,6 +100,32 @@ fn buffers_until_dependencies_arrive() {
 }
 
 #[test]
+fn reports_a_missing_message_with_the_hint_set_after_its_send() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    send(&mut alice, "m1", 1000);
+    alice.set_retrieval_hint("m1", b"h1".to_vec()).unwrap();
+
+    let events = bob
+        .receive(send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    assert!(matches!(
+        &events[0],
+        Event::MissingDependencies { missing, .. } if missing[0].retrieval_hint == Some(b"h1".to_vec())
+    ));
+}
+
+#[test]
+fn rejects_a_hint_for_a_message_not_in_the_log() {
+    let mut alice = channel("alice");
+
+    let result = alice.set_retrieval_hint("m1", b"h1".to_vec());
+
+    assert!(matches!(result, Err(Error::UnknownMessage(message_id)) if message_id == "m1"));
+}
+
+#[test]
 fn reports_the_sender_of_each_released_message() {
     let mut alice = channel("alice");
     let mut bob = channel("bob");
