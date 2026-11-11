@@ -94,6 +94,19 @@ impl<S: Storage> Channel<S> {
         Ok(record)
     }
 
+    /// Sets the retrieval hint later histories give a logged message, for a hint known only once
+    /// its record is sent.
+    pub fn set_retrieval_hint(
+        &mut self,
+        message_id: &str,
+        retrieval_hint: Vec<u8>,
+    ) -> Result<(), Error> {
+        if !self.storage.set_retrieval_hint(message_id, retrieval_hint) {
+            return Err(Error::UnknownMessage(message_id.to_string()));
+        }
+        Ok(())
+    }
+
     /// Returns the record of a message sent without ordering or delivery guarantees.
     pub fn send_ephemeral(&self, message_id: String, content: Vec<u8>) -> Result<SDSRecord, Error> {
         self.check_outgoing_content(&content)?;

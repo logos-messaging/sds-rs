@@ -39,7 +39,7 @@ All protocol hashes are SHA-256 based so any implementation can reproduce them. 
 - Storage sits behind a trait. Ship an in-memory implementation only; replacing it must not require touching protocol logic.
 - Defaults: causal history 10, local history 500, bloom 200 @ 0.1%, resend 60s, T_min 30s, T_max 300s, max 3 repair requests.
 - Message IDs are supplied by the caller (e.g. the transport's message hash).
-- Retrieval hints are optional, supplied by the caller on send and receive, and stored for use in later causal history entries.
+- Retrieval hints are optional, supplied by the caller on send, on receive or after send, and stored for use in later causal history entries.
 - Resends, sync messages and repair rebroadcasts are returned from `tick` as records ready to broadcast.
 - Randomness (sync backoff) comes from a caller-supplied RNG (`rand_core::RngCore`).
 

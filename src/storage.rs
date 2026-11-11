@@ -17,6 +17,8 @@ pub trait Storage {
     fn insert(&mut self, entry: LogEntry);
     fn contains(&self, message_id: &str) -> bool;
     fn get(&self, message_id: &str) -> Option<LogEntry>;
+    /// Returns false when `message_id` is not in the log.
+    fn set_retrieval_hint(&mut self, message_id: &str, retrieval_hint: Vec<u8>) -> bool;
     /// The newest `count` entries, oldest first.
     fn latest(&self, count: usize) -> Vec<LogEntry>;
     fn message_count(&self) -> usize;
@@ -49,6 +51,20 @@ impl Storage for InMemoryStorage {
         self.ordered
             .get(&(lamport_timestamp, message_id.to_string()))
             .cloned()
+    }
+
+    fn set_retrieval_hint(&mut self, message_id: &str, retrieval_hint: Vec<u8>) -> bool {
+        let Some(&lamport_timestamp) = self.lamport_by_id.get(message_id) else {
+            return false;
+        };
+        let Some(entry) = self
+            .ordered
+            .get_mut(&(lamport_timestamp, message_id.to_string()))
+        else {
+            return false;
+        };
+        entry.retrieval_hint = Some(retrieval_hint);
+        true
     }
 
     fn latest(&self, count: usize) -> Vec<LogEntry> {
@@ -113,5 +129,17 @@ mod tests {
         storage.insert(entry("a", 5));
         assert_eq!(storage.get("a").unwrap().lamport_timestamp, 1);
         assert_eq!(storage.message_count(), 1);
+    }
+
+    #[test]
+    fn sets_the_retrieval_hint_of_a_logged_entry() {
+        let mut storage = InMemoryStorage::default();
+        storage.insert(entry("a", 1));
+        assert!(storage.set_retrieval_hint("a", b"h".to_vec()));
+        assert!(!storage.set_retrieval_hint("b", b"h".to_vec()));
+        assert_eq!(
+            storage.get("a").unwrap().retrieval_hint,
+            Some(b"h".to_vec())
+        );
     }
 }
