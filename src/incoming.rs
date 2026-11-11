@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
-use crate::proto::{HistoryEntry, Message};
+use crate::header::{Header, HistoryEntry};
 use crate::record::SDSRecord;
 use crate::storage::Storage;
 
 pub struct PendingDelivery {
-    pub message: Message,
+    pub header: Header,
     pub lamport_timestamp: u64,
     pub record: SDSRecord,
     pub retrieval_hint: Option<Vec<u8>>,
@@ -21,7 +21,7 @@ impl IncomingBuffer {
     pub fn contains(&self, message_id: &str) -> bool {
         self.pending
             .iter()
-            .any(|delivery| delivery.message.message_id == message_id)
+            .any(|delivery| delivery.header.message_id == message_id)
     }
 
     /// Returns the ID of the oldest message if it was dropped to stay within capacity.
@@ -32,24 +32,24 @@ impl IncomingBuffer {
         }
         self.pending
             .pop_front()
-            .map(|dropped| dropped.message.message_id)
+            .map(|dropped| dropped.header.message_id)
     }
 
     pub fn take_ready(&mut self, storage: &impl Storage) -> Option<PendingDelivery> {
         let index = self
             .pending
             .iter()
-            .position(|delivery| has_dependencies(&delivery.message, storage))?;
+            .position(|delivery| has_dependencies(&delivery.header, storage))?;
         self.pending.remove(index)
     }
 
     /// Dependencies that are neither delivered nor waiting in this buffer.
     pub fn missing_dependencies(
         &self,
-        message: &Message,
+        header: &Header,
         storage: &impl Storage,
     ) -> Vec<HistoryEntry> {
-        message
+        header
             .causal_history
             .iter()
             .filter(|entry| {
@@ -62,7 +62,7 @@ impl IncomingBuffer {
     pub fn all_missing_dependencies(&self, storage: &impl Storage) -> Vec<HistoryEntry> {
         self.pending
             .iter()
-            .flat_map(|delivery| self.missing_dependencies(&delivery.message, storage))
+            .flat_map(|delivery| self.missing_dependencies(&delivery.header, storage))
             .collect()
     }
 
@@ -73,15 +73,15 @@ impl IncomingBuffer {
             if now_ms < delivery.received_at_ms + timeout_ms {
                 return true;
             }
-            expired.push(delivery.message.message_id.clone());
+            expired.push(delivery.header.message_id.clone());
             false
         });
         expired
     }
 }
 
-pub fn has_dependencies(message: &Message, storage: &impl Storage) -> bool {
-    message
+pub fn has_dependencies(header: &Header, storage: &impl Storage) -> bool {
+    header
         .causal_history
         .iter()
         .all(|entry| storage.contains(&entry.message_id))

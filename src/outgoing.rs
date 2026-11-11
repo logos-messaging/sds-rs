@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::bloom::BloomFilter;
 use crate::config::Config;
 use crate::event::Event;
-use crate::proto::Message;
+use crate::header::Header;
 use crate::record::SDSRecord;
 
 // Possibly-acknowledged messages have likely reached someone, so unacknowledged ones resend first.
@@ -18,14 +18,14 @@ struct PendingSend {
 }
 
 impl PendingSend {
-    fn record_ack(&mut self, message: &Message, bloom: Option<&BloomFilter>) {
+    fn record_ack(&mut self, header: &Header, bloom: Option<&BloomFilter>) {
         if bloom.is_some_and(|bloom| bloom.contains(&self.message_id)) {
-            self.bloom_ackers.insert(message.sender_id.clone());
+            self.bloom_ackers.insert(header.sender_id.clone());
         }
     }
 
-    fn is_acked(&self, message: &Message, acks_required: usize) -> bool {
-        let in_causal_history = message
+    fn is_acked(&self, header: &Header, acks_required: usize) -> bool {
+        let in_causal_history = header
             .causal_history
             .iter()
             .any(|entry| entry.message_id == self.message_id);
@@ -59,18 +59,18 @@ impl OutgoingBuffer {
     /// Returns the IDs of messages that are now acknowledged.
     pub fn review_acks(
         &mut self,
-        message: &Message,
+        header: &Header,
         hash_count: u32,
         acks_required: usize,
     ) -> Vec<String> {
-        let bloom = message
+        let bloom = header
             .bloom_filter
             .clone()
             .map(|bits| BloomFilter::from_bytes(bits, hash_count));
         let mut acked = Vec::new();
         self.pending.retain_mut(|send| {
-            send.record_ack(message, bloom.as_ref());
-            if !send.is_acked(message, acks_required) {
+            send.record_ack(header, bloom.as_ref());
+            if !send.is_acked(header, acks_required) {
                 return true;
             }
             acked.push(send.message_id.clone());

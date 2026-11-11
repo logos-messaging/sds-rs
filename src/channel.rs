@@ -1,13 +1,12 @@
-use prost::Message as _;
 use rand_core::Rng;
 
 use crate::bloom::{hash_count_for, RollingBloomFilter};
 use crate::config::Config;
 use crate::error::Error;
 use crate::event::Event;
+use crate::header::{Header, HistoryEntry};
 use crate::incoming::{has_dependencies, IncomingBuffer, PendingDelivery};
 use crate::outgoing::OutgoingBuffer;
-use crate::proto::{HistoryEntry, Message};
 use crate::record::SDSRecord;
 use crate::repair::Repair;
 use crate::storage::{InMemoryStorage, LogEntry, Storage};
@@ -80,9 +79,7 @@ impl<S: Storage> Channel<S> {
             retrieval_hint,
         } = message;
         let record = SDSRecord {
-            header: self
-                .build_message(message_id.clone(), now_ms)
-                .encode_to_vec(),
+            header: self.build_header(message_id.clone(), now_ms),
             content: Some(content),
         };
         self.record_in_log(LogEntry {
@@ -100,14 +97,14 @@ impl<S: Storage> Channel<S> {
     /// Returns the record of a message sent without ordering or delivery guarantees.
     pub fn send_ephemeral(&self, message_id: String, content: Vec<u8>) -> Result<SDSRecord, Error> {
         self.check_outgoing_content(&content)?;
-        let header = Message {
+        let header = Header {
             sender_id: self.config.participant_id.clone(),
             message_id,
             channel_id: self.config.channel_id.clone(),
             ..Default::default()
         };
         Ok(SDSRecord {
-            header: header.encode_to_vec(),
+            header,
             content: Some(content),
         })
     }
@@ -118,43 +115,41 @@ impl<S: Storage> Channel<S> {
         retrieval_hint: Option<Vec<u8>>,
         now_ms: u64,
     ) -> Result<Vec<Event>, Error> {
-        let mut message = Message::decode(record.header.as_slice())?;
-        message.content = record.content.clone();
-        self.check_incoming(&message)?;
+        self.check_incoming(&record)?;
+        let mut header = record.header.clone();
         if let Some(repair) = &mut self.repair {
-            repair.on_message_received(&message.message_id);
+            repair.on_message_received(&header.message_id);
         }
-        if message.sender_id == self.config.participant_id {
+        if header.sender_id == self.config.participant_id {
             return Ok(Vec::new());
         }
-        let Some(lamport_timestamp) = message.lamport_timestamp else {
-            return Ok(vec![ready_event(message)]);
+        let Some(lamport_timestamp) = header.lamport_timestamp else {
+            return Ok(vec![ready_event(record)]);
         };
 
         self.last_activity_ms = now_ms;
-        let mut events = self.review_acks(&message);
+        let mut events = self.review_acks(&header);
         // Resends carry their original, now stale, repair requests.
-        if self.storage.contains(&message.message_id) || self.incoming.contains(&message.message_id)
-        {
+        if self.storage.contains(&header.message_id) || self.incoming.contains(&header.message_id) {
             return Ok(events);
         }
         if let Some(repair) = &mut self.repair {
-            repair.on_repair_requests(&message.repair_request, &self.storage, now_ms);
+            repair.on_repair_requests(&header.repair_request, &self.storage, now_ms);
         }
         if !self.is_after_start(lamport_timestamp) {
-            events.extend(self.log_before_start(message, lamport_timestamp, retrieval_hint));
+            events.extend(self.log_before_start(record, lamport_timestamp, retrieval_hint));
             return Ok(events);
         }
-        self.skip_history_before_start(&mut message);
-        if !has_content(&message) {
-            let missing = self.incoming.missing_dependencies(&message, &self.storage);
+        self.skip_history_before_start(&mut header);
+        if !has_content(&record) {
+            let missing = self.incoming.missing_dependencies(&header, &self.storage);
             self.request_repairs(&missing, now_ms);
             return Ok(events);
         }
 
-        self.bloom.insert(&message.message_id);
+        self.bloom.insert(&header.message_id);
         let delivery = PendingDelivery {
-            message,
+            header,
             lamport_timestamp,
             record,
             retrieval_hint,
@@ -175,13 +170,13 @@ impl<S: Storage> Channel<S> {
         events
     }
 
-    fn build_message(&mut self, message_id: String, now_ms: u64) -> Message {
+    fn build_header(&mut self, message_id: String, now_ms: u64) -> Header {
         self.lamport_timestamp = now_ms.max(self.lamport_timestamp + 1);
         let repair_request = match &mut self.repair {
             Some(repair) => repair.take_due_requests(now_ms),
             None => Vec::new(),
         };
-        Message {
+        Header {
             sender_id: self.config.participant_id.clone(),
             message_id,
             channel_id: self.config.channel_id.clone(),
@@ -189,7 +184,6 @@ impl<S: Storage> Channel<S> {
             causal_history: self.causal_history(),
             bloom_filter: Some(self.bloom.as_bytes().to_vec()),
             repair_request,
-            content: None,
         }
     }
 
@@ -209,10 +203,10 @@ impl<S: Storage> Channel<S> {
             .collect()
     }
 
-    fn review_acks(&mut self, message: &Message) -> Vec<Event> {
+    fn review_acks(&mut self, header: &Header) -> Vec<Event> {
         self.outgoing
             .review_acks(
-                message,
+                header,
                 self.bloom_hash_count,
                 self.config.bloom_acks_required,
             )
@@ -233,18 +227,18 @@ impl<S: Storage> Channel<S> {
     // record, so this participant answers no repair with it.
     fn log_before_start(
         &mut self,
-        message: Message,
+        record: SDSRecord,
         lamport_timestamp: u64,
         retrieval_hint: Option<Vec<u8>>,
     ) -> Vec<Event> {
-        if !has_content(&message) {
+        if !has_content(&record) {
             return Vec::new();
         }
-        self.bloom.insert(&message.message_id);
+        self.bloom.insert(&record.header.message_id);
         self.record_in_log(LogEntry {
-            message_id: message.message_id,
+            message_id: record.header.message_id,
             lamport_timestamp,
-            sender_id: message.sender_id,
+            sender_id: record.header.sender_id,
             retrieval_hint,
             record: None,
         });
@@ -252,31 +246,31 @@ impl<S: Storage> Channel<S> {
     }
 
     // A history lists IDs oldest first, so the start and those it lists before it are all met.
-    fn skip_history_before_start(&self, message: &mut Message) {
+    fn skip_history_before_start(&self, header: &mut Header) {
         let Some(start) = &self.config.start else {
             return;
         };
-        let Some(start_index) = message
+        let Some(start_index) = header
             .causal_history
             .iter()
             .position(|entry| entry.message_id == start.message_id)
         else {
             return;
         };
-        message.causal_history.drain(..=start_index);
+        header.causal_history.drain(..=start_index);
     }
 
     fn deliver_or_buffer(&mut self, delivery: PendingDelivery, now_ms: u64) -> Vec<Event> {
-        if has_dependencies(&delivery.message, &self.storage) {
+        if has_dependencies(&delivery.header, &self.storage) {
             return self.deliver_with_dependents(delivery);
         }
         let mut events = Vec::new();
         let missing = self
             .incoming
-            .missing_dependencies(&delivery.message, &self.storage);
+            .missing_dependencies(&delivery.header, &self.storage);
         if !missing.is_empty() {
             self.request_repairs(&missing, now_ms);
-            let message_id = delivery.message.message_id.clone();
+            let message_id = delivery.header.message_id.clone();
             events.push(Event::MissingDependencies {
                 message_id,
                 missing,
@@ -303,12 +297,11 @@ impl<S: Storage> Channel<S> {
     }
 
     fn deliver(&mut self, delivery: PendingDelivery) -> Event {
-        let Message {
+        let Header {
             sender_id,
             message_id,
-            content,
             ..
-        } = delivery.message;
+        } = delivery.header;
         self.lamport_timestamp = self.lamport_timestamp.max(delivery.lamport_timestamp);
         let is_responder = self
             .repair
@@ -319,12 +312,12 @@ impl<S: Storage> Channel<S> {
             lamport_timestamp: delivery.lamport_timestamp,
             sender_id: sender_id.clone(),
             retrieval_hint: delivery.retrieval_hint,
-            record: is_responder.then_some(delivery.record),
+            record: is_responder.then(|| delivery.record.clone()),
         });
         Event::MessageReady {
             message_id,
             sender_id,
-            content: content.unwrap_or_default(),
+            content: delivery.record.content.unwrap_or_default(),
         }
     }
 
@@ -376,8 +369,8 @@ impl<S: Storage> Channel<S> {
     }
 
     fn send_sync(&mut self, now_ms: u64, rng: &mut impl Rng) -> Event {
-        let mut message = self.build_message(String::new(), now_ms);
-        message.message_id = format!(
+        let mut header = self.build_header(String::new(), now_ms);
+        header.message_id = format!(
             "sync-{}-{}",
             self.config.participant_id, self.lamport_timestamp
         );
@@ -385,7 +378,7 @@ impl<S: Storage> Channel<S> {
         // Random backoff so a whole group does not sync in the same instant.
         self.sync_jitter_ms = rng.next_u64() % (self.config.sync_interval_ms / 2 + 1);
         Event::Sync(SDSRecord {
-            header: message.encode_to_vec(),
+            header,
             content: None,
         })
     }
@@ -402,14 +395,14 @@ impl<S: Storage> Channel<S> {
         self.check_content_size(content)
     }
 
-    fn check_incoming(&self, message: &Message) -> Result<(), Error> {
-        if message.channel_id != self.config.channel_id {
+    fn check_incoming(&self, record: &SDSRecord) -> Result<(), Error> {
+        if record.header.channel_id != self.config.channel_id {
             return Err(Error::WrongChannel {
                 expected: self.config.channel_id.clone(),
-                actual: message.channel_id.clone(),
+                actual: record.header.channel_id.clone(),
             });
         }
-        self.check_content_size(message.content.as_deref().unwrap_or_default())
+        self.check_content_size(record.content.as_deref().unwrap_or_default())
     }
 
     fn check_content_size(&self, content: &[u8]) -> Result<(), Error> {
@@ -423,17 +416,17 @@ impl<S: Storage> Channel<S> {
     }
 }
 
-fn has_content(message: &Message) -> bool {
-    message
+fn has_content(record: &SDSRecord) -> bool {
+    record
         .content
         .as_ref()
         .is_some_and(|content| !content.is_empty())
 }
 
-fn ready_event(message: Message) -> Event {
+fn ready_event(record: SDSRecord) -> Event {
     Event::MessageReady {
-        message_id: message.message_id,
-        sender_id: message.sender_id,
-        content: message.content.unwrap_or_default(),
+        message_id: record.header.message_id,
+        sender_id: record.header.sender_id,
+        content: record.content.unwrap_or_default(),
     }
 }

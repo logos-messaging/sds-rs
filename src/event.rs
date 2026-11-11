@@ -1,4 +1,4 @@
-use crate::proto::HistoryEntry;
+use crate::header::HistoryEntry;
 use crate::record::SDSRecord;
 
 #[derive(Clone, Debug, PartialEq)]

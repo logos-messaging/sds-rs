@@ -24,7 +24,7 @@ for event in channel.tick(now_ms, &mut rng) { /* ... */ }
 
 The library has no threads, timers or I/O. The caller supplies the time, the randomness and the transport.
 
-An `SDSRecord` is the encoded header with the content beside it, so a transport can carry the content apart, for instance encrypted. `SDSRecord::to_bytes` and `SDSRecord::from_bytes` convert to and from the spec's single `Message`.
+An `SDSRecord` is the `Header`, the spec's `Message` without its content, and the content beside it, so a transport can carry the content apart, for instance encrypted. The crate has no wire format of its own: the caller encodes a record for its transport and decodes the ones that arrive.
 
 ## Joining a channel under way
 
@@ -34,7 +34,7 @@ Pick a message every participant delivers before sending anything the joiner is 
 
 ## Interoperability
 
-Messages use the spec's protobuf definitions exactly. The spec leaves the hash functions open, so this crate defines them below. Any implementation joining the same channel must use the same hashes and the same `bloom_capacity`, `bloom_error_rate` and SDS-R settings, and list a causal history oldest first, an order the spec leaves open but a start point relies on.
+To interoperate, a caller encodes a record as the spec's protobuf `Message`. The spec leaves the hash functions open, so this crate defines them below. Any implementation joining the same channel must use the same hashes and the same `bloom_capacity`, `bloom_error_rate` and SDS-R settings, and list a causal history oldest first, an order the spec leaves open but a start point relies on.
 
 `u64_be(bytes)` reads 8 bytes as a big-endian unsigned integer.
 
