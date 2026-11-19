@@ -10,7 +10,8 @@ const DEFAULT_BLOOM_ACKS_REQUIRED: usize = 2;
 const DEFAULT_SYNC_INTERVAL_MS: u64 = 30_000;
 const DEFAULT_DEPENDENCY_TIMEOUT_MS: u64 = 600_000;
 const DEFAULT_MAX_INCOMING_BUFFER: usize = 500;
-const DEFAULT_MAX_CONTENT_SIZE: usize = 150 * 1024;
+// Leaves room under a 150 KiB Logos Delivery message for the header and what wraps it.
+const DEFAULT_MAX_CONTENT_SIZE: usize = 128 * 1024;
 const DEFAULT_REPAIR_T_MIN_MS: u64 = 30_000;
 const DEFAULT_REPAIR_T_MAX_MS: u64 = 300_000;
 const DEFAULT_NUM_RESPONSE_GROUPS: u64 = 1;
