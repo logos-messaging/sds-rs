@@ -1,6 +1,8 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use sds::{Channel, Config, Error, Event, OutgoingMessage, SDSRecord, StartPoint};
+use sds::{
+    Channel, Config, Error, Event, HistoryEntry, LossReason, OutgoingMessage, SDSRecord, StartPoint,
+};
 
 const CHANNEL_ID: &str = "chan";
 const MINUTE_MS: u64 = 60_000;
@@ -29,6 +31,13 @@ fn ready_ids(events: &[Event]) -> Vec<String> {
             Event::MessageReady { message_id, .. } => Some(message_id.clone()),
             _ => None,
         })
+        .collect()
+}
+
+fn ids(entries: &[HistoryEntry]) -> Vec<&str> {
+    entries
+        .iter()
+        .map(|entry| entry.message_id.as_str())
         .collect()
 }
 
@@ -91,12 +100,56 @@ fn buffers_until_dependencies_arrive() {
     let events = bob.receive(m2, None, 2000).unwrap();
     assert!(ready_ids(&events).is_empty());
     assert!(
-        matches!(&events[0], Event::MissingDependencies { missing, .. } if missing[0].message_id == "m1")
+        matches!(&events[0], Event::MessageBuffered { missing_dependencies, .. } if missing_dependencies[0].message_id == "m1")
     );
 
     let events = bob.receive(m1, None, 2000).unwrap();
     assert_eq!(ready_ids(&events), ["m1", "m2"]);
     assert_eq!(bob.history(), ["m1", "m2"]);
+}
+
+#[test]
+fn reports_what_a_buffered_message_waits_on() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    send(&mut alice, "m1", 1000);
+    bob.receive(send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    let events = bob
+        .receive(send(&mut alice, "m3", 3000), None, 3000)
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::MessageBuffered { message_id, missing_dependencies, buffered_dependencies }
+            if message_id == "m3"
+                && ids(missing_dependencies) == ["m1"]
+                && ids(buffered_dependencies) == ["m2"]
+    )));
+}
+
+#[test]
+fn reports_a_message_waiting_only_on_buffered_messages() {
+    let mut config = Config::new("alice", CHANNEL_ID);
+    config.max_causal_history = 1;
+    let mut alice = Channel::new(config).unwrap();
+    let mut bob = channel("bob");
+    send(&mut alice, "m1", 1000);
+    bob.receive(send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    let events = bob
+        .receive(send(&mut alice, "m3", 3000), None, 3000)
+        .unwrap();
+
+    assert!(matches!(
+        events.as_slice(),
+        [Event::MessageBuffered { message_id, missing_dependencies, buffered_dependencies }]
+            if message_id == "m3"
+                && missing_dependencies.is_empty()
+                && ids(buffered_dependencies) == ["m2"]
+    ));
 }
 
 #[test]
@@ -112,7 +165,8 @@ fn reports_a_missing_message_with_the_hint_set_after_its_send() {
 
     assert!(matches!(
         &events[0],
-        Event::MissingDependencies { missing, .. } if missing[0].retrieval_hint == Some(b"h1".to_vec())
+        Event::MessageBuffered { missing_dependencies, .. }
+            if missing_dependencies[0].retrieval_hint == Some(b"h1".to_vec())
     ));
 }
 
@@ -251,7 +305,28 @@ fn drops_buffered_message_after_timeout() {
     let events = bob.tick(2000 + timeout_ms, &mut rng());
 
     assert!(events.contains(&Event::Lost {
-        message_id: "m2".into()
+        message_id: "m2".into(),
+        reason: LossReason::Expired,
+    }));
+}
+
+#[test]
+fn drops_the_oldest_buffered_message_when_the_buffer_is_full() {
+    let mut alice = channel("alice");
+    let mut config = Config::new("bob", CHANNEL_ID);
+    config.max_incoming_buffer = 1;
+    let mut bob = Channel::new(config).unwrap();
+    send(&mut alice, "m1", 1000);
+    bob.receive(send(&mut alice, "m2", 2000), None, 2000)
+        .unwrap();
+
+    let events = bob
+        .receive(send(&mut alice, "m3", 3000), None, 3000)
+        .unwrap();
+
+    assert!(events.contains(&Event::Lost {
+        message_id: "m2".into(),
+        reason: LossReason::BufferFull,
     }));
 }
 
@@ -475,7 +550,7 @@ fn waits_on_a_history_that_does_not_name_the_start_point() {
 
     assert!(ready_ids(&events).is_empty());
     assert!(
-        matches!(&events[0], Event::MissingDependencies { missing, .. } if missing[0].message_id == "m1")
+        matches!(&events[0], Event::MessageBuffered { missing_dependencies, .. } if missing_dependencies[0].message_id == "m1")
     );
 }
 

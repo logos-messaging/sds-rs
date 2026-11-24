@@ -59,6 +59,16 @@ impl IncomingBuffer {
             .collect()
     }
 
+    /// Dependencies waiting in this buffer.
+    pub fn buffered_dependencies(&self, header: &Header) -> Vec<HistoryEntry> {
+        header
+            .causal_history
+            .iter()
+            .filter(|entry| self.contains(&entry.message_id))
+            .cloned()
+            .collect()
+    }
+
     pub fn all_missing_dependencies(&self, storage: &impl Storage) -> Vec<HistoryEntry> {
         self.pending
             .iter()

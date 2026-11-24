@@ -3,7 +3,7 @@ use rand_core::Rng;
 use crate::bloom::{hash_count_for, RollingBloomFilter};
 use crate::config::Config;
 use crate::error::Error;
-use crate::event::Event;
+use crate::event::{Event, LossReason};
 use crate::header::{Header, HistoryEntry};
 use crate::incoming::{has_dependencies, IncomingBuffer, PendingDelivery};
 use crate::outgoing::OutgoingBuffer;
@@ -277,20 +277,20 @@ impl<S: Storage> Channel<S> {
         if has_dependencies(&delivery.header, &self.storage) {
             return self.deliver_with_dependents(delivery);
         }
-        let mut events = Vec::new();
-        let missing = self
+        let missing_dependencies = self
             .incoming
             .missing_dependencies(&delivery.header, &self.storage);
-        if !missing.is_empty() {
-            self.request_repairs(&missing, now_ms);
-            let message_id = delivery.header.message_id.clone();
-            events.push(Event::MissingDependencies {
-                message_id,
-                missing,
-            });
-        }
+        self.request_repairs(&missing_dependencies, now_ms);
+        let mut events = vec![Event::MessageBuffered {
+            message_id: delivery.header.message_id.clone(),
+            missing_dependencies,
+            buffered_dependencies: self.incoming.buffered_dependencies(&delivery.header),
+        }];
         if let Some(message_id) = self.incoming.add(delivery, self.config.max_incoming_buffer) {
-            events.push(Event::Lost { message_id });
+            events.push(Event::Lost {
+                message_id,
+                reason: LossReason::BufferFull,
+            });
         }
         events
     }
@@ -353,7 +353,10 @@ impl<S: Storage> Channel<S> {
         self.incoming
             .expire(now_ms, self.config.dependency_timeout_ms)
             .into_iter()
-            .map(|message_id| Event::Lost { message_id })
+            .map(|message_id| Event::Lost {
+                message_id,
+                reason: LossReason::Expired,
+            })
             .collect()
     }
 
