@@ -1,7 +1,8 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use sds::{
-    Channel, Config, Error, Event, HistoryEntry, LossReason, OutgoingMessage, SDSRecord, StartPoint,
+    Channel, Config, Error, Event, HistoryEntry, IgnoreReason, LossReason, OutgoingMessage,
+    SDSRecord, StartPoint,
 };
 
 const CHANNEL_ID: &str = "chan";
@@ -49,6 +50,13 @@ fn sync_record(events: &[Event]) -> SDSRecord {
             _ => None,
         })
         .expect("tick should produce a sync message")
+}
+
+fn ignored(message_id: &str, reason: IgnoreReason) -> Event {
+    Event::MessageIgnored {
+        message_id: message_id.into(),
+        reason,
+    }
 }
 
 fn joiner(participant_id: &str, start: &SDSRecord) -> Channel {
@@ -366,7 +374,37 @@ fn delivers_ephemeral_messages_without_logging() {
 fn ignores_own_messages() {
     let mut alice = channel("alice");
     let m1 = send(&mut alice, "m1", 1000);
-    assert!(alice.receive(m1, None, 1000).unwrap().is_empty());
+    assert_eq!(
+        alice.receive(m1, None, 1000).unwrap(),
+        [ignored("m1", IgnoreReason::Own)]
+    );
+}
+
+#[test]
+fn reports_nothing_for_an_own_sync() {
+    let mut alice = channel("alice");
+    let sync = sync_record(&alice.tick(MINUTE_MS, &mut rng()));
+    assert!(alice.receive(sync, None, MINUTE_MS).unwrap().is_empty());
+}
+
+#[test]
+fn ignores_a_copy_of_a_delivered_or_buffered_message() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    let m1 = send(&mut alice, "m1", 1000);
+    let m2 = send(&mut alice, "m2", 2000);
+    bob.receive(m1.clone(), None, 1000).unwrap();
+    let mut carol = channel("carol");
+    carol.receive(m2.clone(), None, 2000).unwrap();
+
+    assert_eq!(
+        bob.receive(m1, None, 2000).unwrap(),
+        [ignored("m1", IgnoreReason::Duplicate)]
+    );
+    assert_eq!(
+        carol.receive(m2, None, 2000).unwrap(),
+        [ignored("m2", IgnoreReason::Duplicate)]
+    );
 }
 
 #[test]
@@ -473,7 +511,10 @@ fn never_releases_the_start_point() {
     let start = send(&mut alice, "start", 5000);
     let mut carol = joiner("carol", &start);
 
-    assert!(carol.receive(start, None, 5000).unwrap().is_empty());
+    assert_eq!(
+        carol.receive(start, None, 5000).unwrap(),
+        [ignored("start", IgnoreReason::BeforeStart)]
+    );
 }
 
 #[test]
@@ -484,7 +525,10 @@ fn never_releases_a_message_stamped_with_the_start_points_timestamp() {
     let tie = send(&mut dave, "tie", 2000);
     let mut carol = joiner("carol", &start);
 
-    assert!(carol.receive(tie, None, 2000).unwrap().is_empty());
+    assert_eq!(
+        carol.receive(tie, None, 2000).unwrap(),
+        [ignored("tie", IgnoreReason::BeforeStart)]
+    );
 }
 
 #[test]
@@ -566,7 +610,7 @@ fn logs_without_releasing_a_message_from_before_the_start_point() {
 
     let events = carol.receive(d1, None, 2000).unwrap();
 
-    assert!(events.is_empty());
+    assert_eq!(events, [ignored("d1", IgnoreReason::BeforeStart)]);
     assert_eq!(carol.history(), ["d1"]);
 }
 

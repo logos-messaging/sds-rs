@@ -19,6 +19,11 @@ pub enum Event {
         /// Arrived, not yet released.
         buffered_dependencies: Vec<HistoryEntry>,
     },
+    /// A received message that is neither buffered nor released.
+    MessageIgnored {
+        message_id: String,
+        reason: IgnoreReason,
+    },
     SendFailed {
         message_id: String,
     },
@@ -38,4 +43,14 @@ pub enum LossReason {
     Expired,
     /// The incoming buffer was full, and it was the oldest message there.
     BufferFull,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IgnoreReason {
+    /// This participant sent it.
+    Own,
+    /// It is already delivered or buffered.
+    Duplicate,
+    /// It is stamped at or before the start, so it is logged without release.
+    BeforeStart,
 }
