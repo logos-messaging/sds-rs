@@ -3,7 +3,7 @@ use rand_core::Rng;
 use crate::bloom::{hash_count_for, RollingBloomFilter};
 use crate::config::Config;
 use crate::error::Error;
-use crate::event::Event;
+use crate::event::{Event, IgnoreReason, LossReason};
 use crate::header::{Header, HistoryEntry};
 use crate::incoming::{has_dependencies, IncomingBuffer, PendingDelivery};
 use crate::outgoing::OutgoingBuffer;
@@ -134,7 +134,7 @@ impl<S: Storage> Channel<S> {
             repair.on_message_received(&header.message_id);
         }
         if header.sender_id == self.config.participant_id {
-            return Ok(Vec::new());
+            return Ok(ignored(&record, IgnoreReason::Own).into_iter().collect());
         }
         let Some(lamport_timestamp) = header.lamport_timestamp else {
             return Ok(vec![ready_event(record)]);
@@ -144,12 +144,14 @@ impl<S: Storage> Channel<S> {
         let mut events = self.review_acks(&header);
         // Resends carry their original, now stale, repair requests.
         if self.storage.contains(&header.message_id) || self.incoming.contains(&header.message_id) {
+            events.extend(ignored(&record, IgnoreReason::Duplicate));
             return Ok(events);
         }
         if let Some(repair) = &mut self.repair {
             repair.on_repair_requests(&header.repair_request, &self.storage, now_ms);
         }
         if !self.is_after_start(lamport_timestamp) {
+            events.extend(ignored(&record, IgnoreReason::BeforeStart));
             events.extend(self.log_before_start(record, lamport_timestamp, retrieval_hint));
             return Ok(events);
         }
@@ -277,20 +279,20 @@ impl<S: Storage> Channel<S> {
         if has_dependencies(&delivery.header, &self.storage) {
             return self.deliver_with_dependents(delivery);
         }
-        let mut events = Vec::new();
-        let missing = self
+        let missing_dependencies = self
             .incoming
             .missing_dependencies(&delivery.header, &self.storage);
-        if !missing.is_empty() {
-            self.request_repairs(&missing, now_ms);
-            let message_id = delivery.header.message_id.clone();
-            events.push(Event::MissingDependencies {
-                message_id,
-                missing,
-            });
-        }
+        self.request_repairs(&missing_dependencies, now_ms);
+        let mut events = vec![Event::MessageBuffered {
+            message_id: delivery.header.message_id.clone(),
+            missing_dependencies,
+            buffered_dependencies: self.incoming.buffered_dependencies(&delivery.header),
+        }];
         if let Some(message_id) = self.incoming.add(delivery, self.config.max_incoming_buffer) {
-            events.push(Event::Lost { message_id });
+            events.push(Event::Lost {
+                message_id,
+                reason: LossReason::BufferFull,
+            });
         }
         events
     }
@@ -353,7 +355,10 @@ impl<S: Storage> Channel<S> {
         self.incoming
             .expire(now_ms, self.config.dependency_timeout_ms)
             .into_iter()
-            .map(|message_id| Event::Lost { message_id })
+            .map(|message_id| Event::Lost {
+                message_id,
+                reason: LossReason::Expired,
+            })
             .collect()
     }
 
@@ -434,6 +439,14 @@ fn has_content(record: &SDSRecord) -> bool {
         .content
         .as_ref()
         .is_some_and(|content| !content.is_empty())
+}
+
+// A sync carries no message, so is never reported.
+fn ignored(record: &SDSRecord, reason: IgnoreReason) -> Option<Event> {
+    has_content(record).then(|| Event::MessageIgnored {
+        message_id: record.header.message_id.clone(),
+        reason,
+    })
 }
 
 fn ready_event(record: SDSRecord) -> Event {

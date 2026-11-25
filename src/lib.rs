@@ -14,7 +14,7 @@ mod storage;
 pub use channel::{Channel, OutgoingMessage};
 pub use config::{Config, RepairConfig, StartPoint};
 pub use error::Error;
-pub use event::Event;
+pub use event::{Event, IgnoreReason, LossReason};
 pub use header::{Header, HistoryEntry};
 pub use record::SDSRecord;
 pub use storage::{InMemoryStorage, LogEntry, Storage};
