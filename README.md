@@ -21,7 +21,7 @@ channel.set_retrieval_hint("msg-1", retrieval_hint)?;
 // Receive: hand over a record from the transport, act on the events.
 for event in channel.receive(incoming_record, None, now_ms)? { /* ... */ }
 
-// Every few seconds: broadcast any Resend / Sync / Repair records.
+// Every few seconds: broadcast any Resend / Repair records and Sync headers.
 for event in channel.tick(now_ms, &mut rng) { /* ... */ }
 ```
 

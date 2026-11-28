@@ -49,9 +49,15 @@ impl Network {
     fn tick(&mut self, now_ms: u64) {
         for from in 0..self.channels.len() {
             for event in self.channels[from].tick(now_ms, &mut self.rng) {
-                if let Event::Resend(record) | Event::Sync(record) | Event::Repair(record) = event {
-                    self.broadcast(from, record);
-                }
+                let record = match event {
+                    Event::Resend(record) | Event::Repair(record) => record,
+                    Event::Sync(header) => SDSRecord {
+                        header,
+                        content: None,
+                    },
+                    _ => continue,
+                };
+                self.broadcast(from, record);
             }
         }
     }

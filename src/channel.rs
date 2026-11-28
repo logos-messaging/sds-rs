@@ -395,10 +395,7 @@ impl<S: Storage> Channel<S> {
         self.mark_sent(now_ms);
         // Random backoff so a whole group does not sync in the same instant.
         self.sync_jitter_ms = rng.next_u64() % (self.config.sync_interval_ms / 2 + 1);
-        Event::Sync(SDSRecord {
-            header,
-            content: None,
-        })
+        Event::Sync(header)
     }
 
     fn mark_sent(&mut self, now_ms: u64) {

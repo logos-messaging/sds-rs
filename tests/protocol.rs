@@ -46,7 +46,10 @@ fn sync_record(events: &[Event]) -> SDSRecord {
     events
         .iter()
         .find_map(|event| match event {
-            Event::Sync(record) => Some(record.clone()),
+            Event::Sync(header) => Some(SDSRecord {
+                header: header.clone(),
+                content: None,
+            }),
             _ => None,
         })
         .expect("tick should produce a sync message")

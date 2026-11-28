@@ -1,4 +1,4 @@
-use crate::header::HistoryEntry;
+use crate::header::{Header, HistoryEntry};
 use crate::record::SDSRecord;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,7 +33,8 @@ pub enum Event {
         reason: LossReason,
     },
     Resend(SDSRecord),
-    Sync(SDSRecord),
+    /// Header only: a sync has no content.
+    Sync(Header),
     Repair(SDSRecord),
 }
 
